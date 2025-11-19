@@ -1,8 +1,10 @@
- import 'dotenv/config';
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import pkg from 'pg';
+import bcrypt from 'bcrypt';
 const { Pool } = pkg;
+ 
 
 const app = express();
 app.use(cors());
