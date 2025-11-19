@@ -1,15 +1,16 @@
-import 'dotenv/config';
+  import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import pkg from 'pg';
 import bcrypt from 'bcrypt';
+
 const { Pool } = pkg;
- 
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Pool de conexión a Neon con SSL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
@@ -17,8 +18,18 @@ const pool = new Pool({
   },
 });
 
+// Ruta de prueba
 app.get('/health', async (req, res) => {
- // Crear cuenta (primer versión sin SMS ni email todavía)
+  try {
+    await pool.query('SELECT 1');
+    res.json({ ok: true, ts: Date.now() });
+  } catch (err) {
+    console.error('DB error:', err.message);
+    res.status(500).json({ ok: false, error: 'DB error' });
+  }
+});
+
+// ✅ Ruta para crear cuenta
 app.post('/auth/create-account', async (req, res) => {
   try {
     const { name, email, phone, username, password, referredBy } = req.body;
@@ -53,7 +64,7 @@ app.post('/auth/create-account', async (req, res) => {
     const result = await pool.query(insertUser, values);
     const user = result.rows[0];
 
-    // si hay referredBy, registramos en tabla referrals (primera versión sencilla)
+    // si hay referredBy, registramos en tabla referrals
     if (referredBy) {
       await pool.query(
         'INSERT INTO referrals(refId, newUserEmail) VALUES ($1,$2)',
@@ -72,9 +83,13 @@ app.post('/auth/create-account', async (req, res) => {
   } catch (err) {
     console.error('Create account error:', err.message);
     if (err.code === '23505') {
-      // unique_violation
+      // unique_violation (email o username repetido)
       return res.status(400).json({ ok: false, error: 'Email o usuario ya existen.' });
     }
     return res.status(500).json({ ok: false, error: 'Error interno al crear la cuenta.' });
   }
 });
+
+// 👇 IMPORTANTE: app.listen SIEMPRE VA AL FINAL
+const port = process.env.PORT || 8080;
+app.listen(port, () => console.log('API running on port ' + port));
