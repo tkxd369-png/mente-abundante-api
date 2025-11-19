@@ -89,7 +89,3 @@ app.post('/auth/create-account', async (req, res) => {
     return res.status(500).json({ ok: false, error: 'Error interno al crear la cuenta.' });
   }
 });
-
-// 👇 IMPORTANTE: app.listen SIEMPRE VA AL FINAL
-const port = process.env.PORT || 8080;
-app.listen(port, () => console.log('API running on port ' + port));
