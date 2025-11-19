@@ -1,4 +1,4 @@
-import 'dotenv/config';
+ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import pkg from 'pg';
@@ -8,19 +8,19 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Conexión a Neon
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
 
-// Ruta simple para probar
 app.get('/health', async (req, res) => {
   try {
-    // Opcional: probar conexión a DB
     await pool.query('SELECT 1');
     res.json({ ok: true, ts: Date.now() });
   } catch (err) {
-    console.error(err);
+    console.error('DB error:', err.message);
     res.status(500).json({ ok: false, error: 'DB error' });
   }
 });
