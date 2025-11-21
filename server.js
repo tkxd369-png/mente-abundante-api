@@ -1,4 +1,5 @@
 // server.js - API Mente Abundante
+const { ALLOWED_COUNTRIES } = require("./allowedCountries");
 
 require("dotenv").config();
 const express = require("express");
@@ -8,6 +9,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 const app = express();
+const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || "https://mente-abundante.onrender.com";
 
 // ------------------------------------------------------
 // CONFIGURACIÓN
@@ -15,6 +17,8 @@ const app = express();
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET || "CAMBIA_ESTE_SECRETO";
+const FRONTEND_BASE_URL =
+  process.env.FRONTEND_BASE_URL || "https://mente-abundante.onrender.com";
 
 if (!DATABASE_URL) {
   console.error("❌ Falta la variable de entorno DATABASE_URL");
@@ -236,6 +240,68 @@ app.post("/auth/login", async (req, res) => {
     return res
       .status(500)
       .json({ ok: false, error: "Error interno al iniciar sesión." });
+  }
+});
+// ------------------------------------------------------
+//  CHECKOUT MEMBRESÍA (ESQUELETO PARA STRIPE)
+// ------------------------------------------------------
+// body esperado:
+// {
+//   fullName,
+//   email,
+//   phone,
+//   refCode,
+//   country
+// }
+
+app.post("/api/checkout/create", async (req, res) => {
+  try {
+    const { fullName, email, phone, refCode, country } = req.body || {};
+
+    // Validación básica
+    if (!fullName || !email || !phone || !country) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Nombre completo, email, teléfono y país son requeridos para continuar.",
+      });
+    }
+
+    // Validar país permitido
+    if (!ALLOWED_COUNTRIES.includes(country)) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Lo sentimos, actualmente Mente Abundante solo está disponible en países donde podemos realizar pagos.",
+      });
+    }
+
+    // TODO: Aquí después integraremos Stripe Checkout:
+    // 1. Crear sesión de pago en Stripe (por $198)
+    // 2. Incluir metadata: refCode, fullName, email, phone, country
+    // 3. Devolver la URL de Stripe
+
+    console.log("🧾 [CHECKOUT SIMULADO] Nueva solicitud:", {
+      fullName,
+      email,
+      phone,
+      refCode,
+      country,
+    });
+
+    // Por ahora, modo pruebas: simulamos un "checkoutUrl"
+    const fakeCheckoutUrl = `${FRONTEND_BASE_URL}/puente-video.html?test=1`;
+
+    return res.json({
+      ok: true,
+      // En cuanto integremos Stripe, esta propiedad será la URL real de Stripe
+      checkoutUrl: fakeCheckoutUrl,
+    });
+  } catch (err) {
+    console.error("Checkout create error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Error interno al iniciar el checkout." });
   }
 });
 
