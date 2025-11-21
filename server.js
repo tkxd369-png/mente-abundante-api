@@ -455,6 +455,57 @@ app.post("/account/change-password", authMiddleware, async (req, res) => {
       .json({ ok: false, error: "Error interno al cambiar la contraseña." });
   }
 });
+// ------------------------------------------------------
+//  CHECKOUT "FAKE" (sin Stripe, por ahora)
+// ------------------------------------------------------
+//
+// El frontend llama a:
+// POST /api/checkout/create
+//
+// Body esperado:
+// { fullName, email, phone, refCode, country }
+
+const FRONTEND_BASE_URL =
+  process.env.FRONTEND_BASE_URL || "https://mente-abundante.onrender.com";
+
+const ALLOWED_COUNTRIES = ["US", "MX", "BR", "CL", "CO", "PE", "CA"];
+
+app.post("/api/checkout/create", async (req, res) => {
+  try {
+    const { fullName, email, phone, refCode, country } = req.body || {};
+
+    if (!fullName || !email || !phone || !refCode || !country) {
+      return res.status(400).json({
+        ok: false,
+        error: "Todos los campos son requeridos para continuar con la membresía.",
+      });
+    }
+
+    if (!ALLOWED_COUNTRIES.includes(country)) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Por ahora solo estamos disponibles en algunos países. " +
+          "Por favor selecciona un país permitido.",
+      });
+    }
+
+    // 👉 Aquí en el futuro conectaremos Stripe.
+    // Por ahora, solo mandamos a la página puente.
+    const fakeCheckoutUrl = `${FRONTEND_BASE_URL}/puente-video.html?test=1`;
+
+    return res.json({
+      ok: true,
+      checkoutUrl: fakeCheckoutUrl,
+    });
+  } catch (err) {
+    console.error("Checkout create error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Error interno al iniciar el proceso de pago.",
+    });
+  }
+});
 
 // ------------------------------------------------------
 //  SERVER LISTEN
