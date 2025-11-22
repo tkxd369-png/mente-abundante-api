@@ -1,7 +1,5 @@
-// server.js - API Mente Abundante
-const { ALLOWED_COUNTRIES } = require("./allowedCountries");
+ require("dotenv").config();
 
-require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
@@ -9,44 +7,58 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 const app = express();
-const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || "https://mente-abundante.onrender.com";
 
-// ------------------------------------------------------
-// CONFIGURACIÓN
-// ------------------------------------------------------
+// -------------------------
+// Configuración de servidor
+// -------------------------
+const PORT = process.env.PORT || 3000;
 
-const DATABASE_URL = process.env.DATABASE_URL;
-const JWT_SECRET = process.env.JWT_SECRET || "CAMBIA_ESTE_SECRETO";
-const FRONTEND_BASE_URL =
-  process.env.FRONTEND_BASE_URL || "https://mente-abundante.onrender.com";
-
-if (!DATABASE_URL) {
-  console.error("❌ Falta la variable de entorno DATABASE_URL");
+if (!process.env.DATABASE_URL) {
+  console.error("⚠️ Falta DATABASE_URL en .env");
+}
+if (!process.env.JWT_SECRET) {
+  console.error("⚠️ Falta JWT_SECRET en .env");
 }
 
+// -------------------------
+// Pool de PostgreSQL (Neon)
+// -------------------------
 const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
 
+// -------------------------
+// Middlewares globales
+// -------------------------
 app.use(cors());
 app.use(express.json());
 
-// ------------------------------------------------------
-// HELPERS
-// ------------------------------------------------------
+// -------------------------
+// Helpers
+// -------------------------
 
+/**
+ * Crea el token JWT incluyendo si es admin.
+ */
 function createToken(user) {
-  return jwt.sign(
-    {
-      id: user.id,
-    },
-    JWT_SECRET,
-    { expiresIn: "30d" }
-  );
+  const payload = {
+    userId: user.id,
+    isAdmin: !!user.is_admin,
+  };
+
+  return jwt.sign(payload, process.env.JWT_SECRET, {
+    expiresIn: "30d",
+  });
 }
 
+/**
+ * Limpia el usuario para responder al frontend.
+ */
 function buildUserResponse(row) {
+  if (!row) return null;
   return {
     id: row.id,
     full_name: row.full_name,
@@ -55,463 +67,596 @@ function buildUserResponse(row) {
     username: row.username,
     refid: row.refid,
     referredby: row.referredby,
-    referrals: row.referrals ?? 0,
+    referrals: row.referrals || 0,
+    is_admin: !!row.is_admin,
     created_at: row.created_at,
   };
 }
 
-// Middleware de autenticación
+/**
+ * Normaliza teléfono (muy básico: solo dígitos).
+ */
+function normalizePhone(phoneRaw) {
+  if (!phoneRaw) return "";
+  return String(phoneRaw).replace(/\D+/g, "");
+}
+
+/**
+ * Genera un username simple a partir del email si no se envía.
+ */
+function usernameFromEmail(email) {
+  if (!email) return null;
+  const [localPart] = email.split("@");
+  return localPart.replace(/[^a-zA-Z0-9._-]/g, "").toLowerCase();
+}
+
+/**
+ * Genera refid: username limpio (máx 8) + últimos 3 dígitos del teléfono
+ */
+function generateRefId(username, phoneDigits) {
+  const base = (username || "user").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  const short = base.slice(0, 8);
+  const last3 = (phoneDigits || "").slice(-3) || "000";
+  return `${short}${last3}`;
+}
+
+// -------------------------
+// Middlewares de auth
+// -------------------------
+
+/**
+ * Autenticación normal de usuario (token JWT).
+ */
 function authMiddleware(req, res, next) {
-  const auth = req.headers.authorization || "";
-  const parts = auth.split(" ");
-  if (parts.length !== 2 || parts[0] !== "Bearer") {
-    return res.status(401).json({ ok: false, error: "Token no presente." });
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : null;
+
+  if (!token) {
+    return res.status(401).json({ ok: false, error: "No token provided" });
   }
 
-  const token = parts[1];
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    req.user = { id: payload.id };
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.userId = decoded.userId;
+    req.jwtPayload = decoded;
     next();
   } catch (err) {
-    console.error("JWT error:", err.message);
-    return res.status(401).json({ ok: false, error: "Token inválido o expirado." });
+    console.error("authMiddleware error:", err);
+    return res.status(401).json({ ok: false, error: "Invalid or expired token" });
   }
 }
 
-// ------------------------------------------------------
-// ENDPOINTS
-// ------------------------------------------------------
+/**
+ * Autenticación solo para administradores.
+ */
+function adminAuthMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : null;
 
-// Health check
+  if (!token) {
+    return res.status(401).json({ ok: false, error: "No admin token provided" });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (!decoded.isAdmin) {
+      return res.status(403).json({ ok: false, error: "Not an admin" });
+    }
+
+    req.adminId = decoded.userId;
+    req.adminPayload = decoded;
+    next();
+  } catch (err) {
+    console.error("adminAuthMiddleware error:", err);
+    return res.status(401).json({ ok: false, error: "Invalid or expired token" });
+  }
+}
+
+// -------------------------
+// Endpoints básicos
+// -------------------------
+
 app.get("/health", (req, res) => {
   res.json({ ok: true, ts: Date.now() });
 });
 
-// ------------------------------------------------------
-//  AUTH: CREAR CUENTA
-// ------------------------------------------------------
-// Espera body:
-// {
-//    fullName,
-//    email,
-//    phone,
-//    password,
-//    username (opcional),
-//    refCode (opcional: REF del que invitó)
-// }
+// -------------------------
+// AUTH: Crear cuenta
+// -------------------------
 
 app.post("/auth/create-account", async (req, res) => {
   try {
-    const { fullName, email, phone, password, username, refCode } = req.body;
+    const {
+      fullName,
+      email,
+      phone,
+      password,
+      username: usernameRaw,
+      refCode,
+    } = req.body || {};
 
     if (!fullName || !email || !phone || !password) {
       return res.status(400).json({
         ok: false,
-        error: "Nombre completo, email, teléfono y contraseña son requeridos.",
+        error: "Nombre completo, email, teléfono y contraseña son requeridos",
       });
     }
 
-    // Normalizar
-    const cleanEmail = String(email).trim().toLowerCase();
-    const cleanPhone = String(phone).trim();
-    const cleanFullName = String(fullName).trim();
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const normalizedFullName = String(fullName).trim();
+    const normalizedPhone = normalizePhone(phone);
+    let username =
+      (usernameRaw && String(usernameRaw).trim().toLowerCase()) ||
+      usernameFromEmail(normalizedEmail);
 
-    // Generar username si no viene
-    let finalUsername = username
-      ? String(username).trim()
-      : cleanEmail.split("@")[0];
+    if (!username) {
+      username = `user${Date.now()}`;
+    }
 
-    // Evitar espacios raros
-    finalUsername = finalUsername.replace(/\s+/g, "").toLowerCase();
+    // Verificar si ya existe email o username
+    const existing = await pool.query(
+      "SELECT id, email, username FROM users WHERE email = $1 OR username = $2 LIMIT 1",
+      [normalizedEmail, username]
+    );
 
-    // Generar REFID (username + últimos 3 dígitos del teléfono)
-    const digits = cleanPhone.replace(/\D/g, "");
-    const last3 = digits.slice(-3) || "000";
-    const baseRef = finalUsername.replace(/\W/g, "").slice(0, 8).toUpperCase();
-    const refid = baseRef + last3;
+    if (existing.rows.length > 0) {
+      const conflict = existing.rows[0];
+      if (conflict.email === normalizedEmail) {
+        return res
+          .status(409)
+          .json({ ok: false, error: "Este correo ya está registrado." });
+      }
+      if (conflict.username === username) {
+        return res
+          .status(409)
+          .json({ ok: false, error: "Este nombre de usuario ya está en uso." });
+      }
+    }
 
-    // Hash de contraseña
     const passwordHash = await bcrypt.hash(password, 10);
 
-    // Insertar usuario
-    const insertSql = `
-      INSERT INTO users (full_name, email, phone, username, password_hash, refid, referredby)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING id, full_name, email, phone, username, refid, referredby, referrals, created_at;
-    `;
-    const refBy = refCode ? String(refCode).trim().toUpperCase() : null;
+    // Generar refid
+    const refid = generateRefId(username, normalizedPhone);
 
-    const result = await pool.query(insertSql, [
-      cleanFullName,
-      cleanEmail,
-      cleanPhone,
-      finalUsername,
+    // Preparar referredby (refCode)
+    const referredby = refCode ? String(refCode).trim().toUpperCase() : null;
+
+    // Insertar usuario
+    const insertQuery = `
+      INSERT INTO users (
+        full_name,
+        email,
+        phone,
+        username,
+        password_hash,
+        refid,
+        referredby,
+        referrals,
+        is_admin
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 0, false)
+      RETURNING *;
+    `;
+
+    const insertValues = [
+      normalizedFullName,
+      normalizedEmail,
+      normalizedPhone,
+      username,
       passwordHash,
       refid,
-      refBy,
-    ]);
+      referredby,
+    ];
 
-    const newUser = result.rows[0];
+    const { rows } = await pool.query(insertQuery, insertValues);
+    const newUser = rows[0];
 
-    // Si hay refCode, intentamos incrementar referrals del que invitó
-    if (refBy) {
+    // Si hay refCode, sumar 1 al patrocinador
+    if (referredby) {
       try {
         await pool.query(
-          "UPDATE users SET referrals = COALESCE(referrals, 0) + 1 WHERE refid = $1",
-          [refBy]
+          `
+          UPDATE users
+          SET referrals = COALESCE(referrals, 0) + 1
+          WHERE refid = $1;
+        `,
+          [referredby]
         );
-      } catch (e) {
-        console.warn("No se pudo actualizar referrals del referidor:", e.message);
+      } catch (errRef) {
+        console.error("Error actualizando referrals del patrocinador:", errRef);
       }
     }
 
     const token = createToken(newUser);
+    const userResp = buildUserResponse(newUser);
 
-    return res.json({
+    return res.status(201).json({
       ok: true,
       token,
-      user: buildUserResponse(newUser),
+      user: userResp,
     });
   } catch (err) {
-    console.error("Create-account error:", err);
-    if (err.code === "23505") {
-      return res.status(400).json({
-        ok: false,
-        error: "El email, username o refid ya están en uso.",
-      });
-    }
-    return res.status(500).json({
-      ok: false,
-      error: "Error interno al crear la cuenta.",
-    });
+    console.error("POST /auth/create-account error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
-// ------------------------------------------------------
-//  AUTH: LOGIN
-// ------------------------------------------------------
-// body: { email, password }
+// -------------------------
+// AUTH: Login
+// -------------------------
 
 app.post("/auth/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const cleanEmail = String(email || "").trim().toLowerCase();
+    const { email, password } = req.body || {};
 
-    if (!cleanEmail || !password) {
+    if (!email || !password) {
       return res
         .status(400)
-        .json({ ok: false, error: "Email y contraseña son requeridos." });
+        .json({ ok: false, error: "Email y contraseña son requeridos" });
     }
 
-    const sql = `
-      SELECT id, full_name, email, phone, username, refid, referredby,
-             referrals, created_at, password_hash
-      FROM users
-      WHERE email = $1
-      LIMIT 1;
-    `;
-    const result = await pool.query(sql, [cleanEmail]);
+    const normalizedEmail = String(email).trim().toLowerCase();
 
-    if (result.rows.length === 0) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Email o contraseña incorrectos." });
+    const { rows } = await pool.query(
+      "SELECT * FROM users WHERE email = $1 LIMIT 1",
+      [normalizedEmail]
+    );
+
+    if (rows.length === 0) {
+      return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
     }
 
-    const user = result.rows[0];
-    const isValid = await bcrypt.compare(password, user.password_hash);
+    const user = rows[0];
 
-    if (!isValid) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Email o contraseña incorrectos." });
+    const passwordMatch = await bcrypt.compare(password, user.password_hash);
+    if (!passwordMatch) {
+      return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
     }
 
     const token = createToken(user);
+    const userResp = buildUserResponse(user);
 
     return res.json({
       ok: true,
       token,
-      user: buildUserResponse(user),
+      user: userResp,
     });
   } catch (err) {
-    console.error("Login error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, error: "Error interno al iniciar sesión." });
-  }
-});
-// ------------------------------------------------------
-//  CHECKOUT MEMBRESÍA (ESQUELETO PARA STRIPE)
-// ------------------------------------------------------
-// body esperado:
-// {
-//   fullName,
-//   email,
-//   phone,
-//   refCode,
-//   country
-// }
-
-app.post("/api/checkout/create", async (req, res) => {
-  try {
-    const { fullName, email, phone, refCode, country } = req.body || {};
-
-    // Validación básica
-    if (!fullName || !email || !phone || !country) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          "Nombre completo, email, teléfono y país son requeridos para continuar.",
-      });
-    }
-
-    // Validar país permitido
-    if (!ALLOWED_COUNTRIES.includes(country)) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          "Lo sentimos, actualmente Mente Abundante solo está disponible en países donde podemos realizar pagos.",
-      });
-    }
-
-    // TODO: Aquí después integraremos Stripe Checkout:
-    // 1. Crear sesión de pago en Stripe (por $198)
-    // 2. Incluir metadata: refCode, fullName, email, phone, country
-    // 3. Devolver la URL de Stripe
-
-    console.log("🧾 [CHECKOUT SIMULADO] Nueva solicitud:", {
-      fullName,
-      email,
-      phone,
-      refCode,
-      country,
-    });
-
-    // Por ahora, modo pruebas: simulamos un "checkoutUrl"
-    const fakeCheckoutUrl = `${FRONTEND_BASE_URL}/puente-video.html?test=1`;
-
-    return res.json({
-      ok: true,
-      // En cuanto integremos Stripe, esta propiedad será la URL real de Stripe
-      checkoutUrl: fakeCheckoutUrl,
-    });
-  } catch (err) {
-    console.error("Checkout create error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, error: "Error interno al iniciar el checkout." });
+    console.error("POST /auth/login error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
-// ------------------------------------------------------
-//  /me - DATOS DEL USUARIO AUTENTICADO
-// ------------------------------------------------------
+// -------------------------
+// /me: perfil del usuario logueado
+// -------------------------
 
 app.get("/me", authMiddleware, async (req, res) => {
   try {
-    const userId = req.user.id;
-    const sql = `
-      SELECT id, full_name, email, phone, username, refid, referredby,
-             referrals, created_at
-      FROM users
-      WHERE id = $1;
-    `;
-    const result = await pool.query(sql, [userId]);
+    const { userId } = req;
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ ok: false, error: "Usuario no encontrado." });
+    const { rows } = await pool.query(
+      "SELECT * FROM users WHERE id = $1 LIMIT 1",
+      [userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Usuario no encontrado" });
     }
 
-    const user = result.rows[0];
+    const user = rows[0];
+    const userResp = buildUserResponse(user);
 
     return res.json({
       ok: true,
-      user: buildUserResponse(user),
+      user: userResp,
     });
   } catch (err) {
-    console.error("/me error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, error: "Error interno al cargar el perfil." });
+    console.error("GET /me error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
-// ------------------------------------------------------
-//  ACTUALIZAR PERFIL: EMAIL Y/O TELÉFONO
-// ------------------------------------------------------
+// -------------------------
+// Cuenta: actualizar perfil (email / phone)
+// -------------------------
 
 app.post("/account/update-profile", authMiddleware, async (req, res) => {
   try {
-    const { email, phone } = req.body;
-    const userId = req.user.id;
+    const { userId } = req;
+    const { email, phone } = req.body || {};
 
     if (!email && !phone) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Debes enviar al menos email o teléfono." });
+      return res.status(400).json({
+        ok: false,
+        error: "Nada para actualizar (email o teléfono requeridos)",
+      });
     }
 
     const fields = [];
     const values = [];
-    let index = 1;
+    let idx = 1;
 
     if (email) {
-      fields.push(`email = $${index++}`);
+      fields.push(`email = $${idx++}`);
       values.push(String(email).trim().toLowerCase());
     }
     if (phone) {
-      fields.push(`phone = $${index++}`);
-      values.push(String(phone).trim());
+      fields.push(`phone = $${idx++}`);
+      values.push(normalizePhone(phone));
     }
 
     values.push(userId);
 
-    const sql = `
+    const query = `
       UPDATE users
       SET ${fields.join(", ")}
-      WHERE id = $${index}
-      RETURNING id, full_name, email, phone, username, refid, referredby,
-                referrals, created_at;
+      WHERE id = $${idx}
+      RETURNING *;
     `;
 
-    const result = await pool.query(sql, values);
+    const { rows } = await pool.query(query, values);
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ ok: false, error: "Usuario no encontrado." });
+    if (rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Usuario no encontrado" });
     }
 
-    const updatedUser = result.rows[0];
+    const updatedUser = buildUserResponse(rows[0]);
 
     return res.json({
       ok: true,
-      user: buildUserResponse(updatedUser),
+      user: updatedUser,
     });
   } catch (err) {
-    console.error("Update profile error:", err);
-    if (err.code === "23505") {
-      return res.status(400).json({
-        ok: false,
-        error: "El email ya está en uso por otra cuenta.",
-      });
-    }
-    return res
-      .status(500)
-      .json({ ok: false, error: "Error interno al actualizar el perfil." });
+    console.error("POST /account/update-profile error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
-// ------------------------------------------------------
-//  CAMBIAR CONTRASEÑA
-// ------------------------------------------------------
-// body: { currentPassword, newPassword }
+// -------------------------
+// Cuenta: cambiar contraseña
+// -------------------------
 
 app.post("/account/change-password", authMiddleware, async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body;
-    const userId = req.user.id;
+    const { userId } = req;
+    const { currentPassword, newPassword } = req.body || {};
 
     if (!currentPassword || !newPassword) {
       return res.status(400).json({
         ok: false,
-        error: "Debes enviar la contraseña actual y la nueva.",
+        error: "Contraseña actual y nueva contraseña son requeridas",
       });
     }
 
-    const userResult = await pool.query(
-      "SELECT id, password_hash FROM users WHERE id = $1",
+    const { rows } = await pool.query(
+      "SELECT * FROM users WHERE id = $1 LIMIT 1",
       [userId]
     );
 
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ ok: false, error: "Usuario no encontrado." });
+    if (rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Usuario no encontrado" });
     }
 
-    const user = userResult.rows[0];
+    const user = rows[0];
 
-    const isValid = await bcrypt.compare(currentPassword, user.password_hash);
-    if (!isValid) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "La contraseña actual no es correcta." });
+    const match = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!match) {
+      return res.status(401).json({ ok: false, error: "Contraseña actual incorrecta" });
     }
 
     const newHash = await bcrypt.hash(newPassword, 10);
 
-    await pool.query("UPDATE users SET password_hash = $1 WHERE id = $2", [
-      newHash,
-      userId,
+    const { rows: updatedRows } = await pool.query(
+      `
+      UPDATE users
+      SET password_hash = $1
+      WHERE id = $2
+      RETURNING *;
+    `,
+      [newHash, userId]
+    );
+
+    const updatedUser = buildUserResponse(updatedRows[0]);
+
+    return res.json({
+      ok: true,
+      user: updatedUser,
+    });
+  } catch (err) {
+    console.error("POST /account/change-password error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
+});
+
+// -------------------------
+// ADMIN: login
+// -------------------------
+
+app.post("/admin/login", async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+
+    if (!email || !password) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Email y contraseña son requeridos" });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+
+    const { rows } = await pool.query(
+      "SELECT * FROM users WHERE email = $1 LIMIT 1",
+      [normalizedEmail]
+    );
+
+    if (rows.length === 0) {
+      return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
+    }
+
+    const user = rows[0];
+
+    if (!user.is_admin) {
+      return res
+        .status(403)
+        .json({ ok: false, error: "No tienes permisos de administrador" });
+    }
+
+    const passwordMatch = await bcrypt.compare(password, user.password_hash);
+
+    if (!passwordMatch) {
+      return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
+    }
+
+    const token = createToken(user);
+
+    const adminUser = {
+      id: user.id,
+      full_name: user.full_name,
+      email: user.email,
+      refid: user.refid,
+      is_admin: !!user.is_admin,
+    };
+
+    return res.json({
+      ok: true,
+      token,
+      admin: adminUser,
+    });
+  } catch (err) {
+    console.error("POST /admin/login error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
+});
+
+// -------------------------
+// ADMIN: stats
+// -------------------------
+
+app.get("/admin/stats", adminAuthMiddleware, async (req, res) => {
+  try {
+    const statsQuery = `
+      SELECT
+        COUNT(*)::int AS total_users,
+        COALESCE(SUM(referrals), 0)::int AS total_referrals,
+        COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')::int AS users_last_7_days
+      FROM users;
+    `;
+
+    const topReferrersQuery = `
+      SELECT
+        id,
+        full_name,
+        email,
+        refid,
+        COALESCE(referrals, 0)::int AS referrals
+      FROM users
+      WHERE referrals IS NOT NULL AND referrals > 0
+      ORDER BY referrals DESC
+      LIMIT 10;
+    `;
+
+    const [statsResult, topResult] = await Promise.all([
+      pool.query(statsQuery),
+      pool.query(topReferrersQuery),
     ]);
 
+    const stats = statsResult.rows[0];
+
     return res.json({
       ok: true,
-      message: "Contraseña actualizada correctamente.",
+      stats,
+      topReferrers: topResult.rows,
     });
   } catch (err) {
-    console.error("Change password error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, error: "Error interno al cambiar la contraseña." });
+    console.error("GET /admin/stats error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
-// ------------------------------------------------------
-//  CHECKOUT "FAKE" (sin Stripe, por ahora)
-// ------------------------------------------------------
-//
-// El frontend llama a:
-// POST /api/checkout/create
-//
-// Body esperado:
-// { fullName, email, phone, refCode, country }
 
-const FRONTEND_BASE_URL =
-  process.env.FRONTEND_BASE_URL || "https://mente-abundante.onrender.com";
+// -------------------------
+// ADMIN: lista de usuarios con búsqueda y paginación
+// -------------------------
 
-const ALLOWED_COUNTRIES = ["US", "MX", "BR", "CL", "CO", "PE", "CA"];
-
-app.post("/api/checkout/create", async (req, res) => {
+app.get("/admin/users", adminAuthMiddleware, async (req, res) => {
   try {
-    const { fullName, email, phone, refCode, country } = req.body || {};
+    const search = (req.query.search || "").trim();
+    const page = parseInt(req.query.page, 10) || 1;
+    const pageSize = Math.min(parseInt(req.query.pageSize, 10) || 20, 100);
 
-    if (!fullName || !email || !phone || !refCode || !country) {
-      return res.status(400).json({
-        ok: false,
-        error: "Todos los campos son requeridos para continuar con la membresía.",
-      });
+    const offset = (page - 1) * pageSize;
+
+    const params = [];
+    let whereClause = "";
+
+    if (search) {
+      params.push(`%${search.toLowerCase()}%`);
+      whereClause = `
+        WHERE 
+          LOWER(full_name) LIKE $1
+          OR LOWER(email) LIKE $1
+          OR LOWER(refid) LIKE $1
+      `;
     }
 
-    if (!ALLOWED_COUNTRIES.includes(country)) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          "Por ahora solo estamos disponibles en algunos países. " +
-          "Por favor selecciona un país permitido.",
-      });
-    }
+    const countQuery = `
+      SELECT COUNT(*)::int AS total
+      FROM users
+      ${whereClause};
+    `;
 
-    // 👉 Aquí en el futuro conectaremos Stripe.
-    // Por ahora, solo mandamos a la página puente.
-    const fakeCheckoutUrl = `${FRONTEND_BASE_URL}/puente-video.html?test=1`;
+    const listQuery = `
+      SELECT
+        id,
+        full_name,
+        email,
+        phone,
+        refid,
+        referredby,
+        COALESCE(referrals, 0)::int AS referrals,
+        is_admin,
+        created_at
+      FROM users
+      ${whereClause}
+      ORDER BY created_at DESC
+      LIMIT $${params.length + 1}
+      OFFSET $${params.length + 2};
+    `;
+
+    const countParams = [...params];
+    const listParams = [...params, pageSize, offset];
+
+    const [countResult, listResult] = await Promise.all([
+      pool.query(countQuery, countParams),
+      pool.query(listQuery, listParams),
+    ]);
+
+    const total = countResult.rows[0].total;
+    const users = listResult.rows;
 
     return res.json({
       ok: true,
-      checkoutUrl: fakeCheckoutUrl,
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
+      users,
     });
   } catch (err) {
-    console.error("Checkout create error:", err);
-    return res.status(500).json({
-      ok: false,
-      error: "Error interno al iniciar el proceso de pago.",
-    });
+    console.error("GET /admin/users error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
-// ------------------------------------------------------
-//  SERVER LISTEN
-// ------------------------------------------------------
+// -------------------------
+// Inicio del servidor
+// -------------------------
 
-const port = process.env.PORT || 8080;
-app.listen(port, () => {
-  console.log("✅ API Mente Abundante escuchando en el puerto " + port);
+app.listen(PORT, () => {
+  console.log(`✅ Mente Abundante API escuchando en el puerto ${PORT}`);
 });
