@@ -70,8 +70,10 @@ function buildUserResponse(row) {
     referrals: row.referrals || 0,
     is_admin: !!row.is_admin,
     created_at: row.created_at,
+    lang: row.lang || "es",   // 👈 ADDED
   };
 }
+ 
 
 /**
  * Normaliza teléfono (muy básico: solo dígitos).
