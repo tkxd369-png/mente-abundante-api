@@ -173,14 +173,16 @@ app.get("/health", (req, res) => {
 
 app.post("/auth/create-account", async (req, res) => {
   try {
-    const {
-      fullName,
-      email,
-      phone,
-      password,
-      username: usernameRaw,
-      refCode,
-    } = req.body || {};
+ const {
+  fullName,
+  email,
+  phone,
+  password,
+  username: usernameRaw,
+  refCode,
+  lang,         // 👈 nuevo
+} = req.body || {};
+
 
     if (!fullName || !email || !phone || !password) {
       return res.status(400).json({
@@ -229,7 +231,10 @@ app.post("/auth/create-account", async (req, res) => {
     const referredby = refCode ? String(refCode).trim().toUpperCase() : null;
 
     // Insertar usuario
-    const insertQuery = `
+   // idioma normalizado: si no viene "en", usamos "es"
+const userLang = (lang || "").toLowerCase() === "en" ? "en" : "es";
+
+const insertQuery = `
       INSERT INTO users (
         full_name,
         email,
@@ -239,21 +244,24 @@ app.post("/auth/create-account", async (req, res) => {
         refid,
         referredby,
         referrals,
-        is_admin
+        is_admin,
+        lang
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, 0, false)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 0, false, $8)
       RETURNING *;
     `;
 
-    const insertValues = [
-      normalizedFullName,
-      normalizedEmail,
-      normalizedPhone,
-      username,
-      passwordHash,
-      refid,
-      referredby,
-    ];
+const insertValues = [
+  normalizedFullName,
+  normalizedEmail,
+  normalizedPhone,
+  username,
+  passwordHash,
+  refid,
+  referredby,
+  userLang, // 👈 aquí guardamos el idioma
+];
+
 
     const { rows } = await pool.query(insertQuery, insertValues);
     const newUser = rows[0];
