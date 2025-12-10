@@ -71,6 +71,7 @@ function buildUserResponse(row) {
     is_admin: !!row.is_admin,
     created_at: row.created_at,
     lang: row.lang || "es",   // 👈 ADDED
+    country: row.country || null,  
   };
 }
  
@@ -181,6 +182,7 @@ app.post("/auth/create-account", async (req, res) => {
   username: usernameRaw,
   refCode,
   lang,         // 👈 nuevo
+  country,  
 } = req.body || {};
 
 
@@ -260,6 +262,7 @@ const insertValues = [
   refid,
   referredby,
   userLang, // 👈 aquí guardamos el idioma
+ country || null, 
 ];
 
 
@@ -631,6 +634,7 @@ app.get("/admin/users", adminAuthMiddleware, async (req, res) => {
         COALESCE(referrals, 0)::int AS referrals,
         is_admin,
         created_at
+        country 
       FROM users
       ${whereClause}
       ORDER BY created_at DESC
