@@ -71,7 +71,7 @@ function buildUserResponse(row) {
     is_admin: !!row.is_admin,
     created_at: row.created_at,
     lang: row.lang || "es",   // 👈 ADDED
-    country: row.country || null,  
+    country: row.country, || null,  
   };
 }
  
@@ -247,7 +247,7 @@ app.post("/auth/create-account", async (req, res) => {
     referrals,
     is_admin,
     lang,
-    country
+    country,
   )
   VALUES ($1, $2, $3, $4, $5, $6, $7, 0, false, $8, $9)
   RETURNING *;
@@ -262,7 +262,7 @@ const insertValues = [
   refid,                // $6
   referredby,           // $7
   userLang,             // $8
-  country || null,      // $9
+  country, || null,      // $9
 ];
  
 
@@ -635,7 +635,7 @@ app.get("/admin/users", adminAuthMiddleware, async (req, res) => {
         is_admin,
         created_at,
         lang,
-        country
+        country,
       FROM users
       ${whereClause}
       ORDER BY created_at DESC
