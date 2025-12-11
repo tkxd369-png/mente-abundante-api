@@ -231,12 +231,11 @@ app.post("/auth/create-account", async (req, res) => {
 
     // Preparar referredby (refCode)
     const referredby = refCode ? String(refCode).trim().toUpperCase() : null;
-
     // Insertar usuario
-   // idioma normalizado: si no viene "en", usamos "es"
-const userLang = (lang || "").toLowerCase() === "en" ? "en" : "es";
+    // idioma normalizado: si no viene "en", usamos "es"
+    const userLang = (lang || "").toLowerCase() === "en" ? "en" : "es";
 
-const insertQuery = `
+    const insertQuery = `
       INSERT INTO users (
         full_name,
         email,
@@ -247,28 +246,29 @@ const insertQuery = `
         referredby,
         referrals,
         is_admin,
-        lang
+        lang,
+        country
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, 0, false, $8)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 0, false, $8, $9)
       RETURNING *;
     `;
 
-const insertValues = [
-  normalizedFullName,
-  normalizedEmail,
-  normalizedPhone,
-  username,
-  passwordHash,
-  refid,
-  referredby,
-  userLang, // 👈 aquí guardamos el idioma
- country || null, 
-];
-
+    const insertValues = [
+      normalizedFullName,
+      normalizedEmail,
+      normalizedPhone,
+      username,
+      passwordHash,
+      refid,
+      referredby,
+      userLang,
+      country || null,
+    ];
 
     const { rows } = await pool.query(insertQuery, insertValues);
     const newUser = rows[0];
 
+   
     // Si hay refCode, sumar 1 al patrocinador
     if (referredby) {
       try {
@@ -592,10 +592,9 @@ app.get("/admin/stats", adminAuthMiddleware, async (req, res) => {
   }
 });
 
-// -------------------------
+ // -------------------------
 // ADMIN: lista de usuarios con búsqueda y paginación
 // -------------------------
-
 app.get("/admin/users", adminAuthMiddleware, async (req, res) => {
   try {
     const search = (req.query.search || "").trim();
@@ -633,8 +632,9 @@ app.get("/admin/users", adminAuthMiddleware, async (req, res) => {
         referredby,
         COALESCE(referrals, 0)::int AS referrals,
         is_admin,
-        created_at
-        country 
+        created_at,
+        lang,
+        country
       FROM users
       ${whereClause}
       ORDER BY created_at DESC
@@ -666,6 +666,7 @@ app.get("/admin/users", adminAuthMiddleware, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
+
 
 // -------------------------
 // Inicio del servidor
