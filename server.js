@@ -235,35 +235,36 @@ app.post("/auth/create-account", async (req, res) => {
     // idioma normalizado: si no viene "en", usamos "es"
     const userLang = (lang || "").toLowerCase() === "en" ? "en" : "es";
 
-    const insertQuery = `
-      INSERT INTO users (
-        full_name,
-        email,
-        phone,
-        username,
-        password_hash,
-        refid,
-        referredby,
-        referrals,
-        is_admin,
-        lang,
-        country
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, 0, false, $8, $9)
-      RETURNING *;
-    `;
+   const insertQuery = `
+  INSERT INTO users (
+    full_name,
+    email,
+    phone,
+    username,
+    password_hash,
+    refid,
+    referredby,
+    referrals,
+    is_admin,
+    lang,
+    country
+  )
+  VALUES ($1, $2, $3, $4, $5, $6, $7, 0, false, $8, $9)
+  RETURNING *;
+`;
 
-    const insertValues = [
-      normalizedFullName,
-      normalizedEmail,
-      normalizedPhone,
-      username,
-      passwordHash,
-      refid,
-      referredby,
-      userLang,
-      country || null,
-    ];
+const insertValues = [
+  normalizedFullName,   // $1
+  normalizedEmail,      // $2
+  normalizedPhone,      // $3
+  username,             // $4
+  passwordHash,         // $5
+  refid,                // $6
+  referredby,           // $7
+  userLang,             // $8
+  country || null,      // $9
+];
+ 
 
     const { rows } = await pool.query(insertQuery, insertValues);
     const newUser = rows[0];
