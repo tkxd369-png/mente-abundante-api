@@ -674,9 +674,9 @@ app.get("/admin/users", adminAuthMiddleware, async (req, res) => {
 // Inicio del servidor
 // -------------------------
 const TMK_PHASES = [
-  { phase: 1, limitPerHour: 100, price: 497, reward: 177.30, maxPayments: 1000 },
-  { phase: 2, limitPerHour: 200, price: 777, reward: 177.30, maxPayments: 10000 },
-  { phase: 3, limitPerHour: 300, price: 1270, reward: 250.00, maxPayments: 40000 },
+  { phase: 1, limitPerHour: 100, price: 497, reward: 177.30, maxPayments: 2 },
+  { phase: 2, limitPerHour: 200, price: 777, reward: 177.30, maxPayments: 2 },
+  { phase: 3, limitPerHour: 300, price: 1270, reward: 250.00, maxPayments: 2 },
   { phase: 4, limitPerHour: 400, price: 1970, reward: 447.00, maxPayments: null },
 ];
 
