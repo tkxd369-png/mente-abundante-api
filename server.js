@@ -57,7 +57,7 @@ function createToken(user) {
 /**
  * Limpia el usuario para responder al frontend.
  */
-function buildUserResponse(row) {
+ function buildUserResponse(row) {
   if (!row) return null;
   return {
     id: row.id,
@@ -70,10 +70,11 @@ function buildUserResponse(row) {
     referrals: row.referrals || 0,
     is_admin: !!row.is_admin,
     created_at: row.created_at,
-    lang: row.lang || "es",   // 👈 ADDED
-    country: row.country, || null,  
+    lang: row.lang || "es",
+    country: row.country || null,
   };
 }
+
  
 
 /**
@@ -623,24 +624,25 @@ app.get("/admin/users", adminAuthMiddleware, async (req, res) => {
     `;
 
     const listQuery = `
-      SELECT
-        id,
-        full_name,
-        email,
-        phone,
-        refid,
-        referredby,
-        COALESCE(referrals, 0)::int AS referrals,
-        is_admin,
-        created_at,
-        lang,
-        country,
-      FROM users
-      ${whereClause}
-      ORDER BY created_at DESC
-      LIMIT $${params.length + 1}
-      OFFSET $${params.length + 2};
-    `;
+  SELECT
+    id,
+    full_name,
+    email,
+    phone,
+    refid,
+    referredby,
+    COALESCE(referrals, 0)::int AS referrals,
+    is_admin,
+    created_at,
+    lang,
+    country
+  FROM users
+  ${whereClause}
+  ORDER BY created_at DESC
+  LIMIT $${params.length + 1}
+  OFFSET $${params.length + 2};
+`;
+
 
     const countParams = [...params];
     const listParams = [...params, pageSize, offset];
@@ -671,6 +673,99 @@ app.get("/admin/users", adminAuthMiddleware, async (req, res) => {
 // -------------------------
 // Inicio del servidor
 // -------------------------
+const TMK_PHASES = [
+  { phase: 1, limitPerHour: 100, price: 497, reward: 177.30, maxPayments: 1000 },
+  { phase: 2, limitPerHour: 200, price: 777, reward: 177.30, maxPayments: 10000 },
+  { phase: 3, limitPerHour: 300, price: 1270, reward: 250.00, maxPayments: 40000 },
+  { phase: 4, limitPerHour: 400, price: 1970, reward: 447.00, maxPayments: null },
+];
+
+// Calcula la fase actual por total de pagos
+async function getCurrentPhase() {
+  const { rows } = await pool.query(`SELECT COUNT(*)::int AS total FROM payments;`);
+  const total = rows[0]?.total || 0;
+
+  let current = TMK_PHASES[TMK_PHASES.length - 1];
+  for (const p of TMK_PHASES) {
+    if (p.maxPayments && total < p.maxPayments) { current = p; break; }
+  }
+  return { totalPayments: total, config: current };
+}
+app.get("/gate/status", async (req, res) => {
+  try {
+    const { config, totalPayments } = await getCurrentPhase();
+
+    // pagos en los últimos 60 minutos
+    const { rows } = await pool.query(`
+      SELECT COUNT(*)::int AS last_hour
+      FROM payments
+      WHERE created_at >= NOW() - INTERVAL '60 minutes';
+    `);
+
+    const lastHour = rows[0]?.last_hour || 0;
+    const isOpen = lastHour < config.limitPerHour;
+
+    // Para countdown simple: si está cerrado, estimamos “retry” a 60 min desde el pago más viejo dentro de la hora
+    let retrySeconds = 0;
+    if (!isOpen) {
+      const oldest = await pool.query(`
+        SELECT created_at
+        FROM payments
+        WHERE created_at >= NOW() - INTERVAL '60 minutes'
+        ORDER BY created_at ASC
+        LIMIT 1;
+      `);
+      const oldestTs = oldest.rows[0]?.created_at;
+      if (oldestTs) {
+        // segundos hasta que ese pago salga de la ventana de 60 min
+        const diff = await pool.query(`SELECT EXTRACT(EPOCH FROM (($1::timestamptz + INTERVAL '60 minutes') - NOW()))::int AS s;`, [oldestTs]);
+        retrySeconds = Math.max(diff.rows[0]?.s || 0, 0);
+      } else {
+        retrySeconds = 60 * 60;
+      }
+    }
+
+    return res.json({
+      ok: true,
+      gate: {
+        open: isOpen,
+        lastHour,
+        limitPerHour: config.limitPerHour,
+        retrySeconds,
+      },
+      phase: {
+        phase: config.phase,
+        price: config.price,
+        reward: config.reward,
+        totalPayments,
+      },
+    });
+  } catch (err) {
+    console.error("GET /gate/status error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
+});
+app.post("/dev/mock-payment", adminAuthMiddleware, async (req, res) => {
+  try {
+    const amount = Number(req.body?.amount || 0);
+    const amountCents = Math.round(amount * 100);
+    if (!amountCents || amountCents < 100) {
+      return res.status(400).json({ ok: false, error: "amount inválido" });
+    }
+
+    const { config } = await getCurrentPhase();
+
+    const { rows } = await pool.query(
+      `INSERT INTO payments (amount_cents, currency, phase) VALUES ($1,'usd',$2) RETURNING *;`,
+      [amountCents, config.phase]
+    );
+
+    return res.json({ ok: true, payment: rows[0] });
+  } catch (err) {
+    console.error("POST /dev/mock-payment error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`✅ Mente Abundante API escuchando en el puerto ${PORT}`);
