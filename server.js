@@ -170,6 +170,52 @@ app.get("/health", (req, res) => {
 });
 
 // -------------------------
+// Verificar Access Key (refid)
+// -------------------------
+app.get("/auth/validate-ref/:refid", async (req, res) => {
+  try {
+    const refid = String(req.params.refid || "").trim().toUpperCase();
+
+    if (!refid) {
+      return res.status(400).json({
+        ok: false,
+        valid: false,
+        error: "Missing refid"
+      });
+    }
+
+    const { rows } = await pool.query(
+      "SELECT id, full_name, refid FROM users WHERE UPPER(refid) = $1 LIMIT 1",
+      [refid]
+    );
+
+    if (rows.length === 0) {
+      return res.json({
+        ok: true,
+        valid: false
+      });
+    }
+
+    return res.json({
+      ok: true,
+      valid: true,
+      sponsor: {
+        id: rows[0].id,
+        full_name: rows[0].full_name,
+        refid: rows[0].refid
+      }
+    });
+  } catch (err) {
+    console.error("GET /auth/validate-ref/:refid error:", err);
+    return res.status(500).json({
+      ok: false,
+      valid: false,
+      error: "Server error"
+    });
+  }
+});
+
+// -------------------------
 // AUTH: Crear cuenta
 // -------------------------
 
