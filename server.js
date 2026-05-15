@@ -856,7 +856,47 @@ app.post("/auth/forgot-password", async (req, res) => {
       [resetToken, expiresAt, user.id]
     );
 
-    console.log("Reset token:", resetToken);
+     const resetUrl =
+  `https://themasterkeyprogram.com/reset-password.html?token=${resetToken}`;
+
+const lang = (user.lang === "en") ? "en" : "es";
+
+const subject =
+  lang === "en"
+    ? "Reset your password"
+    : "Restablece tu contraseña";
+
+const html =
+  lang === "en"
+    ? `
+      <h2>The Master Key</h2>
+      <p>Click the button below to reset your password.</p>
+      <p>
+        <a href="${resetUrl}&lang=en"
+           style="display:inline-block;padding:12px 24px;background:#d4af37;color:#000;text-decoration:none;border-radius:999px;">
+          Reset Password
+        </a>
+      </p>
+      <p>This link expires in 1 hour.</p>
+    `
+    : `
+      <h2>The Master Key</h2>
+      <p>Haz clic en el botón para restablecer tu contraseña.</p>
+      <p>
+        <a href="${resetUrl}&lang=es"
+           style="display:inline-block;padding:12px 24px;background:#d4af37;color:#000;text-decoration:none;border-radius:999px;">
+          Restablecer contraseña
+        </a>
+      </p>
+      <p>Este enlace expira en 1 hora.</p>
+    `;
+
+await resend.emails.send({
+  from: "The Master Key <support@themasterkeyprogram.com>",
+  to: user.email,
+  subject,
+  html,
+});
 
     return res.json({ ok: true });
   } catch (err) {
