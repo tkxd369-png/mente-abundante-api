@@ -813,7 +813,114 @@ app.post("/dev/mock-payment", adminAuthMiddleware, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
+// -------------------------
+// AUTH: Forgot Password
+// -------------------------
+app.post("/auth/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body || {};
 
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        error: "Email is required",
+      });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+
+    const { rows } = await pool.query(
+      "SELECT * FROM users WHERE email = $1 LIMIT 1",
+      [normalizedEmail]
+    );
+
+    // Por seguridad, siempre respondemos ok:true
+    if (rows.length === 0) {
+      return res.json({ ok: true });
+    }
+
+    const user = rows[0];
+
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hora
+
+    await pool.query(
+      `
+      UPDATE users
+      SET reset_token = $1,
+          reset_token_expires = $2
+      WHERE id = $3
+      `,
+      [resetToken, expiresAt, user.id]
+    );
+
+    console.log("Reset token:", resetToken);
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("POST /auth/forgot-password error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+    });
+  }
+});
+
+// -------------------------
+// AUTH: Reset Password
+// -------------------------
+app.post("/auth/reset-password", async (req, res) => {
+  try {
+    const { token, password } = req.body || {};
+
+    if (!token || !password) {
+      return res.status(400).json({
+        ok: false,
+        error: "Token and password are required",
+      });
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT *
+      FROM users
+      WHERE reset_token = $1
+        AND reset_token_expires > NOW()
+      LIMIT 1
+      `,
+      [token]
+    );
+
+    if (rows.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid or expired token",
+      });
+    }
+
+    const user = rows[0];
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    await pool.query(
+      `
+      UPDATE users
+      SET password_hash = $1,
+          reset_token = NULL,
+          reset_token_expires = NULL
+      WHERE id = $2
+      `,
+      [passwordHash, user.id]
+    );
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("POST /auth/reset-password error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+    });
+  }
+});
 app.listen(PORT, () => {
   console.log(`✅ Mente Abundante API escuchando en el puerto ${PORT}`);
 });
