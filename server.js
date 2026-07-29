@@ -10,6 +10,8 @@ const app = express();
  const Resend = require("resend").Resend;
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+const paymentsRouter = require("./routes/payments");
+
 // -------------------------
 // Configuración de servidor
 // -------------------------
@@ -37,6 +39,8 @@ const pool = new Pool({
 // -------------------------
 app.use(cors());
 app.use(express.json());
+
+app.use("/payments", paymentsRouter);
 
 // -------------------------
 // Helpers
