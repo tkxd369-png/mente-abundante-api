@@ -1,4 +1,4 @@
-const express = require("express");
+ const express = require("express");
 const Stripe = require("stripe");
 const { Pool } = require("pg");
 const router = express.Router();
@@ -240,6 +240,9 @@ const signupUrl = getSignupUrl(lang);
 const cancelUrl = getMembershipUrl(lang, refCode);
 const session = await stripe.checkout.sessions.create({
 mode: "payment",
+// Force Stripe Checkout to match the TMKP language flow.
+// Spanish uses Stripe's Latin American Spanish locale.
+locale: lang === "en" ? "en" : "es-419",
 customer_email: email,
 line_items: [
 {
