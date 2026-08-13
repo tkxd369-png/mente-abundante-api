@@ -1,5 +1,4 @@
- 
- const express = require("express");
+const express = require("express");
 const Stripe = require("stripe");
 const { Pool } = require("pg");
 const router = express.Router();
@@ -406,6 +405,35 @@ error: "Payment has not been confirmed.",
 });
 }
 if (row.signup_used) {
+return res.status(409).json({
+authorized: false,
+error: "This payment has already been used to create an account.",
+});
+}
+// Defense in depth:
+// If an account already exists for the email tied to this paid Checkout
+// Session, treat the payment as consumed even if signup_used was not
+// previously flipped for any reason.
+const existingUser = await pool.query(
+`
+SELECT id
+FROM users
+WHERE LOWER(email) = LOWER($1)
+LIMIT 1
+`,
+[row.email]
+);
+if (existingUser.rows.length > 0) {
+await pool.query(
+`
+UPDATE stripe_checkout_access
+SET signup_used = TRUE,
+signup_used_at = COALESCE(signup_used_at, NOW()),
+updated_at = NOW()
+WHERE stripe_session_id = $1
+`,
+[sessionId]
+);
 return res.status(409).json({
 authorized: false,
 error: "This payment has already been used to create an account.",
