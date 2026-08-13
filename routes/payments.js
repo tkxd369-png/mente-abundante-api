@@ -436,4 +436,4 @@ ok: false,
 error: "Reactivation is not implemented.",
 });
 });
-module.exports = route
+module.exports = router;
