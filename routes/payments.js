@@ -1,3 +1,4 @@
+ 
  const express = require("express");
 const Stripe = require("stripe");
 const { Pool } = require("pg");
@@ -73,11 +74,11 @@ return clean(value, 5).toLowerCase() === "en" ? "en" : "es";
 }
 function getSignupUrl(lang) {
 return lang === "en"
-? `${SITE_URL}/signup.en.html`
+? `${SITE_URL}/signup-en.html`
 : `${SITE_URL}/signup.html`;
 }
 function getMembershipUrl(lang, refCode) {
-const page = lang === "en" ? "membership.html" : "membresia.html";
+const page = lang === "en" ? "membresia-en.html" : "membresia.html";
 const base = `${SITE_URL}/${page}`;
 return refCode ? `${base}?ref=${encodeURIComponent(refCode)}` : base;
 }
