@@ -1,4 +1,4 @@
-require("dotenv").config();
+ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
@@ -201,60 +201,128 @@ error: "Server error"
 });
 // -------------------------
 // AUTH: Crear cuenta
+// Protegido por Stripe Checkout:
+// - exige sessionId
+// - confirma pago "paid"
+// - bloquea reutilización del mismo pago
+// - usa los datos del checkout guardados en PostgreSQL
 // -------------------------
 app.post("/auth/create-account", async (req, res) => {
+const client = await pool.connect();
+let transactionStarted = false;
 try {
 const {
-fullName,
-email,
-phone,
+sessionId,
 password,
 username: usernameRaw,
-refCode,
-lang, // n nuevo
-country,
 } = req.body || {};
-if (!fullName || !email || !phone || !password) {
+if (!sessionId || !String(sessionId).startsWith("cs_")) {
 return res.status(400).json({
 ok: false,
-error: "Nombre completo, email, teléfono y contraseña son requeridos",
+error: "Se requiere una sesión válida de Stripe para crear la cuenta.",
 });
 }
-const normalizedEmail = String(email).trim().toLowerCase();
-const normalizedFullName = String(fullName).trim();
-const normalizedPhone = normalizePhone(phone);
+if (!password) {
+return res.status(400).json({
+ok: false,
+error: "La contraseña es requerida.",
+});
+}
+await client.query("BEGIN");
+transactionStarted = true;
+// Bloqueamos esta compra mientras se crea la cuenta.
+// Esto evita que dos solicitudes simultáneas usen el mismo pago.
+const paymentResult = await client.query(
+`
+SELECT
+stripe_session_id,
+email,
+full_name,
+phone,
+country,
+ref_code,
+lang,
+payment_status,
+signup_used
+FROM stripe_checkout_access
+WHERE stripe_session_id = $1
+LIMIT 1
+FOR UPDATE;
+`,
+[String(sessionId).trim()]
+);
+if (paymentResult.rows.length === 0) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(403).json({
+ok: false,
+error: "No se encontró una compra válida para esta sesión.",
+});
+}
+const checkout = paymentResult.rows[0];
+if (checkout.payment_status !== "paid") {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(402).json({
+ok: false,
+error: "El pago todavía no ha sido confirmado.",
+});
+}
+if (checkout.signup_used) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(409).json({
+ok: false,
+error: "Este pago ya fue utilizado para crear una cuenta.",
+});
+}
+// Los datos de identidad/referral vienen del checkout confirmado,
+// no del navegador.
+const normalizedEmail = String(checkout.email || "").trim().toLowerCase();
+const normalizedFullName = String(checkout.full_name || "").trim();
+const normalizedPhone = normalizePhone(checkout.phone || "");
+const normalizedCountry = String(checkout.country || "").trim().toUpperCase();
+const referredby = checkout.ref_code
+? String(checkout.ref_code).trim().toUpperCase()
+: null;
+const userLang =
+String(checkout.lang || "").toLowerCase() === "en" ? "en" : "es";
+if (!normalizedFullName || !normalizedEmail || !normalizedPhone) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(400).json({
+ok: false,
+error: "La compra no contiene todos los datos necesarios para crear la cuenta.",
+});
+}
 let username =
 (usernameRaw && String(usernameRaw).trim().toLowerCase()) ||
 usernameFromEmail(normalizedEmail);
 if (!username) {
 username = `user${Date.now()}`;
 }
-// Verificar si ya existe email o username
-const existing = await pool.query(
+// Verificar si ya existe email o username.
+const existing = await client.query(
 "SELECT id, email, username FROM users WHERE email = $1 OR username = $2 LIMIT 1",
 [normalizedEmail, username]
 );
 if (existing.rows.length > 0) {
 const conflict = existing.rows[0];
+await client.query("ROLLBACK");
+transactionStarted = false;
 if (conflict.email === normalizedEmail) {
-return res
-.status(409)
-.json({ ok: false, error: "Este correo ya está registrado." });
+return res.status(409).json({
+ok: false,
+error: "Este correo ya está registrado.",
+});
 }
-if (conflict.username === username) {
-return res
-.status(409)
-.json({ ok: false, error: "Este nombre de usuario ya está en uso." });
-}
+return res.status(409).json({
+ok: false,
+error: "Este nombre de usuario ya está en uso.",
+});
 }
 const passwordHash = await bcrypt.hash(password, 10);
-// Generar refid
 const refid = generateRefId(username, normalizedPhone);
-// Preparar referredby (refCode)
-const referredby = refCode ? String(refCode).trim().toUpperCase() : null;
-// Insertar usuario
-// idioma normalizado: si no viene "en", usamos "es"
-const userLang = (lang || "").toLowerCase() === "en" ? "en" : "es";
 const insertQuery = `
 INSERT INTO users (
 full_name,
@@ -281,25 +349,39 @@ passwordHash,
 refid,
 referredby,
 userLang,
-country || null
+normalizedCountry || null,
 ];
-const { rows } = await pool.query(insertQuery, insertValues);
+const { rows } = await client.query(insertQuery, insertValues);
 const newUser = rows[0];
-// Si hay refCode, sumar 1 al patrocinador
+// Crédito al patrocinador dentro de la misma transacción.
 if (referredby) {
-try {
-await pool.query(
+await client.query(
 `
 UPDATE users
 SET referrals = COALESCE(referrals, 0) + 1
-WHERE refid = $1;
+WHERE UPPER(refid) = $1;
 `,
 [referredby]
 );
-} catch (errRef) {
-console.error("Error actualizando referrals del patrocinador:", errRef);
 }
+// Consumir la compra. Desde este momento este sessionId ya no
+// puede utilizarse para crear otra cuenta.
+const consumeResult = await client.query(
+`
+UPDATE stripe_checkout_access
+SET signup_used = TRUE,
+signup_used_at = NOW(),
+updated_at = NOW()
+WHERE stripe_session_id = $1
+AND signup_used = FALSE;
+`,
+[String(sessionId).trim()]
+);
+if (consumeResult.rowCount !== 1) {
+throw new Error("Stripe Checkout Session could not be consumed.");
 }
+await client.query("COMMIT");
+transactionStarted = false;
 const token = createToken(newUser);
 const userResp = buildUserResponse(newUser);
 return res.status(201).json({
@@ -308,8 +390,27 @@ token,
 user: userResp,
 });
 } catch (err) {
+if (transactionStarted) {
+try {
+await client.query("ROLLBACK");
+} catch (rollbackErr) {
+console.error("ROLLBACK /auth/create-account error:", rollbackErr);
+}
+}
 console.error("POST /auth/create-account error:", err);
-return res.status(500).json({ ok: false, error: "Server error" });
+// PostgreSQL unique_violation.
+if (err && err.code === "23505") {
+return res.status(409).json({
+ok: false,
+error: "El correo, usuario o código personal ya está registrado.",
+});
+}
+return res.status(500).json({
+ok: false,
+error: "Server error",
+});
+} finally {
+client.release();
 }
 });
 // -------------------------
@@ -656,8 +757,8 @@ LIMIT 1;
 const oldestTs = oldest.rows[0]?.created_at;
 if (oldestTs) {
 // segundos hasta que ese pago salga de la ventana de 60 min
-const diff = await pool.query(`SELECT EXTRACT(EPOCH FROM (($1::timestamptz + INTERVAL '60 minutes') - NOW(
-)))::int AS s;`, [oldestTs]);
+const diff = await pool.query(`SELECT EXTRACT(EPOCH FROM (($1::timestamptz + INTERVAL '60 minutes') - NOW()))::int AS s;`,
+[oldestTs]);
 retrySeconds = Math.max(diff.rows[0]?.s || 0, 0);
 } else {
 retrySeconds = 60 * 60;
@@ -748,8 +849,7 @@ lang === "en"
 <p>Click the button below to reset your password.</p>
 <p>
 <a href="${resetUrl}&lang=en"
-style="display:inline-block;padding:12px 24px;background:#d4af37;color:#000;text-decoration:none;border-
-radius:999px;">
+style="display:inline-block;padding:12px 24px;background:#d4af37;color:#000;text-decoration:none;border-radius:999px;">
 Reset Password
 </a>
 </p>
@@ -760,8 +860,7 @@ Reset Password
 <p>Haz clic en el botón para restablecer tu contraseña.</p>
 <p>
 <a href="${resetUrl}&lang=es"
-style="display:inline-block;padding:12px 24px;background:#d4af37;color:#000;text-decoration:none;border-
-radius:999px;">
+style="display:inline-block;padding:12px 24px;background:#d4af37;color:#000;text-decoration:none;border-radius:999px;">
 Restablecer contraseña
 </a>
 </p>
@@ -833,4 +932,4 @@ error: "Server error",
 });
 app.listen(PORT, () => {
 console.log(`n Mente Abundante API escuchando en el puerto ${PORT}`);
-}); 
+}
