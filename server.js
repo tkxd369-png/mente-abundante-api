@@ -874,7 +874,7 @@ requestedUnit: unit,
 });
 }
 if (!existing) {
-const insertResult = await client.query(
+ const insertResult = await client.query(
 `
 INSERT INTO user_content_progress (
 user_id,
@@ -887,17 +887,17 @@ completed_at,
 updated_at
 )
 VALUES (
-$1,
-$2,
-$3,
+$1::bigint,
+$2::text,
+$3::integer,
 CASE
-WHEN $3 >= $4 THEN 'completed'
+WHEN $3::integer >= $4::integer THEN 'completed'
 ELSE 'in_progress'
 END,
 NOW(),
 NOW(),
 CASE
-WHEN $3 >= $4 THEN NOW()
+WHEN $3::integer >= $4::integer THEN NOW()
 ELSE NULL
 END,
 NOW()
@@ -941,23 +941,23 @@ requestedUnit: unit,
 });
 }
 if (unit > savedUnit) {
-const updateResult = await client.query(
+ const updateResult = await client.query(
 `
 UPDATE user_content_progress
-SET current_unit = $3,
+SET current_unit = $3::integer,
 status = CASE
-WHEN $3 >= $4 THEN 'completed'
+WHEN $3::integer >= $4::integer THEN 'completed'
 ELSE 'in_progress'
 END,
 unlocked_at = COALESCE(unlocked_at, NOW()),
 started_at = COALESCE(started_at, NOW()),
 completed_at = CASE
-WHEN $3 >= $4 THEN COALESCE(completed_at, NOW())
+WHEN $3::integer >= $4::integer THEN COALESCE(completed_at, NOW())
 ELSE completed_at
 END,
 updated_at = NOW()
-WHERE user_id = $1
-AND content_key = $2
+WHERE user_id = $1::bigint
+AND content_key = $2::text
 RETURNING *;
 `,
 [userId, contentKey, unit, totalUnits]
