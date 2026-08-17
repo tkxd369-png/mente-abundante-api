@@ -219,6 +219,16 @@ item.sortOrder,
 ]
 );
 }
+ await pool.query(`
+  UPDATE user_content_progress AS p
+  SET status = 'in_progress',
+      completed_at = NULL,
+      updated_at = NOW()
+  FROM content_catalog AS c
+  WHERE p.content_key = c.content_key
+    AND p.status = 'completed'
+    AND p.current_unit < c.total_units;
+`);
 console.log("[OK] TMKP content progress tables ready");
 } catch (err) {
 console.error("ensureContentProgressTables error:", err);
