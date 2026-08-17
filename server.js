@@ -833,11 +833,11 @@ app.post("/progress/resume", authMiddleware, async (req, res) => {
 
     const totalUnits = Number(catalogResult.rows[0].total_units);
 
-    if (resumeUnit < 1 || resumeUnit > totalUnits) {
+    if (resumeUnit < 0 || resumeUnit > totalUnits) {
       return res.status(400).json({
         ok: false,
         code: "INVALID_RESUME_UNIT",
-        error: `resumeUnit must be between 1 and ${totalUnits}`,
+        error: `resumeUnit must be between 0 and ${totalUnits}`,
       });
     }
 
