@@ -107,6 +107,127 @@ console.error("ensureAccountSecurityTables error:", err);
 }
 }
 const accountSecurityReady = ensureAccountSecurityTables();
+// =========================================================
+// TMKP CONTENT PROGRESS - STEP 1
+// Database structure only.
+// PostgreSQL will be the official source of member progress.
+// This block does NOT change any existing login, Stripe,
+// email, dashboard, E-Book, or TTP behavior.
+// =========================================================
+const CONTENT_PROGRESS_DEFINITIONS = [
+{
+contentKey: "ebook_abundance",
+contentType: "ebook",
+titleEs: "Yo Decido Ser Abundante",
+titleEn: "I Choose To Be Abundant",
+totalUnits: 7,
+sortOrder: 10,
+},
+{
+contentKey: "truth_path",
+contentType: "program",
+titleEs: "The Truth Path",
+titleEn: "The Truth Path",
+totalUnits: 40,
+sortOrder: 20,
+},
+];
+async function ensureContentProgressTables() {
+try {
+// Small catalog of TMKP books/programs.
+await pool.query(`
+CREATE TABLE IF NOT EXISTS content_catalog (
+content_key TEXT PRIMARY KEY,
+content_type TEXT NOT NULL,
+title_es TEXT NOT NULL,
+title_en TEXT NOT NULL,
+total_units INTEGER NOT NULL CHECK (total_units > 0),
+sort_order INTEGER NOT NULL DEFAULT 0,
+is_active BOOLEAN NOT NULL DEFAULT TRUE,
+created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`);
+// Only members who actually begin/unlock content receive rows here.
+// We do NOT create empty progress rows for every registered member.
+await pool.query(`
+CREATE TABLE IF NOT EXISTS user_content_progress (
+user_id BIGINT NOT NULL,
+content_key TEXT NOT NULL
+REFERENCES content_catalog(content_key)
+ON DELETE CASCADE,
+current_unit INTEGER NOT NULL DEFAULT 0
+CHECK (current_unit >= 0),
+status TEXT NOT NULL DEFAULT 'locked'
+CHECK (
+status IN (
+'locked',
+'unlocked',
+'in_progress',
+'completed'
+)
+),
+unlocked_at TIMESTAMPTZ,
+started_at TIMESTAMPTZ,
+completed_at TIMESTAMPTZ,
+updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+PRIMARY KEY (user_id, content_key)
+);
+`);
+// Useful later for Supervisor reports and completion statistics.
+await pool.query(`
+CREATE INDEX IF NOT EXISTS idx_user_content_progress_content_status
+ON user_content_progress (content_key, status);
+`);
+await pool.query(`
+CREATE INDEX IF NOT EXISTS idx_user_content_progress_updated_at
+ON user_content_progress (updated_at DESC);
+`);
+// Seed/update only the content catalog.
+// This creates TWO tiny catalog rows, not rows for every member.
+for (const item of CONTENT_PROGRESS_DEFINITIONS) {
+await pool.query(
+`
+INSERT INTO content_catalog (
+content_key,
+content_type,
+title_es,
+title_en,
+total_units,
+sort_order,
+is_active,
+updated_at
+)
+VALUES ($1,$2,$3,$4,$5,$6,TRUE,NOW())
+ON CONFLICT (content_key)
+DO UPDATE SET
+content_type = EXCLUDED.content_type,
+title_es = EXCLUDED.title_es,
+title_en = EXCLUDED.title_en,
+total_units = EXCLUDED.total_units,
+sort_order = EXCLUDED.sort_order,
+is_active = TRUE,
+updated_at = NOW();
+`,
+[
+item.contentKey,
+item.contentType,
+item.titleEs,
+item.titleEn,
+item.totalUnits,
+item.sortOrder,
+]
+);
+}
+console.log("[OK] TMKP content progress tables ready");
+} catch (err) {
+console.error("ensureContentProgressTables error:", err);
+}
+}
+const contentProgressReady = ensureContentProgressTables();
+// =========================================================
+// END TMKP CONTENT PROGRESS - STEP 1
+// =========================================================
 // -------------------------
 // Middlewares globales
 // -------------------------
