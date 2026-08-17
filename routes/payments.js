@@ -238,6 +238,60 @@ error:
 }
 const signupUrl = getSignupUrl(lang);
 const cancelUrl = getMembershipUrl(lang, refCode);
+// PREVENT DUPLICATE CHARGES:
+// 1) If this email already owns an account, do not open Stripe again.
+const existingUser = await pool.query(
+`
+SELECT id
+FROM users
+WHERE LOWER(email) = LOWER($1)
+LIMIT 1
+`,
+[email]
+);
+if (existingUser.rows.length > 0) {
+return res.status(409).json({
+ok: false,
+code: "ACCOUNT_EXISTS",
+error:
+lang === "en"
+? "An account already exists for this email."
+: "Ya existe una cuenta con este correo.",
+redirectUrl:
+lang === "en"
+? `${SITE_URL}/login.html?lang=en`
+: `${SITE_URL}/login.html`,
+});
+}
+// 2) If this email already has a confirmed payment that has not yet
+// been used to create an account, resume that signup instead of
+// collecting a second payment.
+const existingPaidCheckout = await pool.query(
+`
+SELECT stripe_session_id
+FROM stripe_checkout_access
+WHERE LOWER(email) = LOWER($1)
+AND payment_status = 'paid'
+AND signup_used = FALSE
+ORDER BY updated_at DESC
+LIMIT 1
+`,
+[email]
+);
+if (existingPaidCheckout.rows.length > 0) {
+const existingSessionId =
+existingPaidCheckout.rows[0].stripe_session_id;
+return res.status(409).json({
+ok: false,
+code: "PAYMENT_ALREADY_CONFIRMED",
+error:
+lang === "en"
+? "A confirmed payment already exists for this email."
+: "Ya existe un pago confirmado para este correo.",
+redirectUrl:
+`${signupUrl}?session_id=${encodeURIComponent(existingSessionId)}`,
+});
+}
 const session = await stripe.checkout.sessions.create({
 mode: "payment",
 // Force Stripe Checkout to match the TMKP language flow.
