@@ -685,6 +685,314 @@ console.error("GET /me error:", err);
 return res.status(500).json({ ok: false, error: "Server error" });
 }
 });
+// =========================================================
+// TMKP CONTENT PROGRESS - STEP 2
+// Member progress endpoints.
+// Requires STEP 1 above.
+// =========================================================
+function normalizeContentKey(value) {
+return String(value || "").trim().toLowerCase();
+}
+function progressRowToResponse(row) {
+const totalUnits = Number(row.total_units || 0);
+const currentUnit = Math.min(
+Math.max(Number(row.current_unit || 0), 0),
+totalUnits || Number.MAX_SAFE_INTEGER
+);
+const percent =
+totalUnits > 0
+? Math.min(100, Math.round((currentUnit / totalUnits) * 100))
+: 0;
+return {
+contentKey: row.content_key,
+contentType: row.content_type,
+titleEs: row.title_es,
+titleEn: row.title_en,
+totalUnits,
+currentUnit,
+percent,
+status: row.effective_status || row.status || "locked",
+unlockedAt: row.unlocked_at || null,
+startedAt: row.started_at || null,
+completedAt: row.completed_at || null,
+updatedAt: row.progress_updated_at || null,
+};
+}
+async function getUserContentProgress(userId, db = pool) {
+const { rows } = await db.query(
+`
+SELECT
+c.content_key,
+c.content_type,
+c.title_es,
+c.title_en,
+c.total_units,
+c.sort_order,
+COALESCE(p.current_unit, 0)::int AS current_unit,
+CASE
+WHEN p.status IS NOT NULL THEN p.status
+WHEN c.content_key = 'ebook_abundance' THEN 'unlocked'
+ELSE 'locked'
+END AS effective_status,
+p.unlocked_at,
+p.started_at,
+p.completed_at,
+p.updated_at AS progress_updated_at
+FROM content_catalog AS c
+LEFT JOIN user_content_progress AS p
+ON p.content_key = c.content_key
+AND p.user_id = $1
+WHERE c.is_active = TRUE
+ORDER BY c.sort_order ASC, c.content_key ASC;
+`,
+[userId]
+);
+return rows.map(progressRowToResponse);
+}
+// GET /progress
+// Returns the official progress for the logged-in member.
+app.get("/progress", authMiddleware, async (req, res) => {
+try {
+await contentProgressReady;
+const progress = await getUserContentProgress(req.userId);
+return res.json({
+ok: true,
+progress,
+});
+} catch (err) {
+console.error("GET /progress error:", err);
+return res.status(500).json({
+ok: false,
+error: "Server error",
+});
+}
+});
+// POST /progress/update
+// Saves one completed unit. Progress can only move forward in sequence.
+app.post("/progress/update", authMiddleware, async (req, res) => {
+const client = await pool.connect();
+let transactionStarted = false;
+try {
+await contentProgressReady;
+const userId = req.userId;
+const contentKey = normalizeContentKey(req.body?.contentKey);
+const unit = Number(req.body?.unit);
+if (!contentKey || !Number.isInteger(unit)) {
+return res.status(400).json({
+ok: false,
+error: "contentKey and integer unit are required",
+});
+}
+await client.query("BEGIN");
+transactionStarted = true;
+const catalogResult = await client.query(
+`
+SELECT
+content_key,
+total_units
+FROM content_catalog
+WHERE content_key = $1
+AND is_active = TRUE
+LIMIT 1
+FOR SHARE;
+`,
+[contentKey]
+);
+if (catalogResult.rows.length === 0) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(404).json({
+ok: false,
+code: "CONTENT_NOT_FOUND",
+error: "Content not found",
+});
+}
+const totalUnits = Number(catalogResult.rows[0].total_units);
+if (unit < 1 || unit > totalUnits) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(400).json({
+ok: false,
+code: "INVALID_PROGRESS_UNIT",
+error: `Unit must be between 1 and ${totalUnits}`,
+});
+}
+const progressResult = await client.query(
+`
+SELECT
+user_id,
+content_key,
+current_unit,
+status,
+unlocked_at,
+started_at,
+completed_at,
+updated_at
+FROM user_content_progress
+WHERE user_id = $1
+AND content_key = $2
+LIMIT 1
+FOR UPDATE;
+`,
+[userId, contentKey]
+);
+let existing = progressResult.rows[0] || null;
+// The first E-Book is included with membership and is implicitly unlocked.
+// Other programs must first be unlocked by a server-side rule.
+if (!existing && contentKey !== "ebook_abundance") {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(403).json({
+ok: false,
+code: "CONTENT_LOCKED",
+error: "This content is locked",
+});
+}
+if (existing && existing.status === "locked") {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(403).json({
+ok: false,
+code: "CONTENT_LOCKED",
+error: "This content is locked",
+});
+}
+const currentUnit = existing
+? Number(existing.current_unit || 0)
+: 0;
+// Repeating the same/older completed unit is harmless.
+// Jumping several units forward is rejected.
+if (unit > currentUnit + 1) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(409).json({
+ok: false,
+code: "PROGRESS_OUT_OF_SEQUENCE",
+error: "Progress must be completed in sequence",
+currentUnit,
+requestedUnit: unit,
+});
+}
+if (!existing) {
+const insertResult = await client.query(
+`
+INSERT INTO user_content_progress (
+user_id,
+content_key,
+current_unit,
+status,
+unlocked_at,
+started_at,
+completed_at,
+updated_at
+)
+VALUES (
+$1,
+$2,
+$3,
+CASE
+WHEN $3 >= $4 THEN 'completed'
+ELSE 'in_progress'
+END,
+NOW(),
+NOW(),
+CASE
+WHEN $3 >= $4 THEN NOW()
+ELSE NULL
+END,
+NOW()
+)
+ON CONFLICT (user_id, content_key)
+DO NOTHING
+RETURNING *;
+`,
+[userId, contentKey, unit, totalUnits]
+);
+if (insertResult.rows.length > 0) {
+existing = insertResult.rows[0];
+} else {
+// Extremely rare simultaneous request: lock the row created by
+// the other request and continue safely.
+const retryResult = await client.query(
+`
+SELECT *
+FROM user_content_progress
+WHERE user_id = $1
+AND content_key = $2
+LIMIT 1
+FOR UPDATE;
+`,
+[userId, contentKey]
+);
+existing = retryResult.rows[0] || null;
+}
+}
+if (existing) {
+const savedUnit = Number(existing.current_unit || 0);
+if (unit > savedUnit + 1) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(409).json({
+ok: false,
+code: "PROGRESS_OUT_OF_SEQUENCE",
+error: "Progress must be completed in sequence",
+currentUnit: savedUnit,
+requestedUnit: unit,
+});
+}
+if (unit > savedUnit) {
+const updateResult = await client.query(
+`
+UPDATE user_content_progress
+SET current_unit = $3,
+status = CASE
+WHEN $3 >= $4 THEN 'completed'
+ELSE 'in_progress'
+END,
+unlocked_at = COALESCE(unlocked_at, NOW()),
+started_at = COALESCE(started_at, NOW()),
+completed_at = CASE
+WHEN $3 >= $4 THEN COALESCE(completed_at, NOW())
+ELSE completed_at
+END,
+updated_at = NOW()
+WHERE user_id = $1
+AND content_key = $2
+RETURNING *;
+`,
+[userId, contentKey, unit, totalUnits]
+);
+existing = updateResult.rows[0];
+}
+}
+await client.query("COMMIT");
+transactionStarted = false;
+const progress = await getUserContentProgress(userId);
+const item =
+progress.find((p) => p.contentKey === contentKey) || null;
+return res.json({
+ok: true,
+item,
+progress,
+});
+} catch (err) {
+if (transactionStarted) {
+try {
+await client.query("ROLLBACK");
+} catch (_) {}
+}
+console.error("POST /progress/update error:", err);
+return res.status(500).json({
+ok: false,
+error: "Server error",
+});
+} finally {
+client.release();
+}
+});
+// =========================================================
+// END TMKP CONTENT PROGRESS - STEP 2
+// =========================================================
 // -------------------------
 // Cuenta: actualizar perfil (email / phone)
 // -------------------------
