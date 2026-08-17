@@ -797,41 +797,79 @@ app.post("/progress/resume", authMiddleware, async (req, res) => {
     const contentKey = normalizeContentKey(req.body?.contentKey);
     const resumeUnit = Number(req.body?.resumeUnit);
 
-    if (contentKey !== "ebook_abundance") {
-      return res.status(400).json({
-        ok: false,
-        code: "UNSUPPORTED_CONTENT",
-        error: "Resume tracking is currently enabled only for the E-Book",
-      });
-    }
+    if (!["ebook_abundance", "truth_path"].includes(contentKey)) {
+  return res.status(400).json({
+    ok: false,
+    code: "UNSUPPORTED_CONTENT",
+    error: "Resume tracking is not enabled for this content",
+  });
+}
 
-    if (!Number.isInteger(resumeUnit)) {
-      return res.status(400).json({
-        ok: false,
-        error: "integer resumeUnit is required",
-      });
-    }
+if (!Number.isInteger(resumeUnit)) {
+  return res.status(400).json({
+    ok: false,
+    error: "integer resumeUnit is required",
+  });
+}
 
-    const catalogResult = await pool.query(
-      `
-        SELECT total_units
-        FROM content_catalog
-        WHERE content_key = $1
-          AND is_active = TRUE
-        LIMIT 1;
-      `,
-      [contentKey]
-    );
+const catalogResult = await pool.query(
+  `
+    SELECT total_units
+    FROM content_catalog
+    WHERE content_key = $1
+      AND is_active = TRUE
+    LIMIT 1;
+  `,
+  [contentKey]
+);
 
-    if (catalogResult.rows.length === 0) {
-      return res.status(404).json({
-        ok: false,
-        code: "CONTENT_NOT_FOUND",
-        error: "Content not found",
-      });
-    }
+if (catalogResult.rows.length === 0) {
+  return res.status(404).json({
+    ok: false,
+    code: "CONTENT_NOT_FOUND",
+    error: "Content not found",
+  });
+}
 
-    const totalUnits = Number(catalogResult.rows[0].total_units);
+const totalUnits = Number(catalogResult.rows[0].total_units);
+
+if (contentKey === "truth_path") {
+  const accessResult = await pool.query(
+    `
+      SELECT current_unit, status
+      FROM user_content_progress
+      WHERE user_id = $1::bigint
+        AND content_key = 'truth_path'
+      LIMIT 1;
+    `,
+    [userId]
+  );
+
+  const access = accessResult.rows[0] || null;
+  const allowedStatuses = ["unlocked", "in_progress", "completed"];
+
+  if (!access || !allowedStatuses.includes(access.status)) {
+    return res.status(403).json({
+      ok: false,
+      code: "CONTENT_LOCKED",
+      error: "The Truth Path is locked",
+    });
+  }
+
+  const currentUnit = Number(access.current_unit || 0);
+  const maxResumeUnit = Math.min(totalUnits, currentUnit + 1);
+
+  if (resumeUnit > maxResumeUnit) {
+    return res.status(409).json({
+      ok: false,
+      code: "RESUME_OUT_OF_SEQUENCE",
+      error: "Resume position is ahead of the allowed Truth Path day",
+      currentUnit,
+      maxResumeUnit,
+      requestedResumeUnit: resumeUnit,
+    });
+  }
+}
 
     if (resumeUnit < 0 || resumeUnit > totalUnits) {
       return res.status(400).json({
