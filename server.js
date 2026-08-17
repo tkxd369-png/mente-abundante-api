@@ -120,7 +120,7 @@ contentKey: "ebook_abundance",
 contentType: "ebook",
 titleEs: "Yo Decido Ser Abundante",
 titleEn: "I Choose To Be Abundant",
-totalUnits: 7,
+totalUnits: 10,
 sortOrder: 10,
 },
 {
