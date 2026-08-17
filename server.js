@@ -786,6 +786,110 @@ error: "Server error",
 });
 }
 });
+// POST /progress/resume
+// Guarda la última sección del E-Book que el miembro abrió.
+// NO marca esa sección como completada.
+app.post("/progress/resume", authMiddleware, async (req, res) => {
+  try {
+    await contentProgressReady;
+
+    const userId = req.userId;
+    const contentKey = normalizeContentKey(req.body?.contentKey);
+    const resumeUnit = Number(req.body?.resumeUnit);
+
+    if (contentKey !== "ebook_abundance") {
+      return res.status(400).json({
+        ok: false,
+        code: "UNSUPPORTED_CONTENT",
+        error: "Resume tracking is currently enabled only for the E-Book",
+      });
+    }
+
+    if (!Number.isInteger(resumeUnit)) {
+      return res.status(400).json({
+        ok: false,
+        error: "integer resumeUnit is required",
+      });
+    }
+
+    const catalogResult = await pool.query(
+      `
+        SELECT total_units
+        FROM content_catalog
+        WHERE content_key = $1
+          AND is_active = TRUE
+        LIMIT 1;
+      `,
+      [contentKey]
+    );
+
+    if (catalogResult.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        code: "CONTENT_NOT_FOUND",
+        error: "Content not found",
+      });
+    }
+
+    const totalUnits = Number(catalogResult.rows[0].total_units);
+
+    if (resumeUnit < 1 || resumeUnit > totalUnits) {
+      return res.status(400).json({
+        ok: false,
+        code: "INVALID_RESUME_UNIT",
+        error: `resumeUnit must be between 1 and ${totalUnits}`,
+      });
+    }
+
+    await pool.query(
+      `
+        INSERT INTO user_content_progress (
+          user_id,
+          content_key,
+          current_unit,
+          status,
+          unlocked_at,
+          started_at,
+          resume_unit,
+          resume_updated_at,
+          updated_at
+        )
+        VALUES (
+          $1::bigint,
+          $2::text,
+          0,
+          'in_progress',
+          NOW(),
+          NOW(),
+          $3::integer,
+          NOW(),
+          NOW()
+        )
+        ON CONFLICT (user_id, content_key)
+        DO UPDATE SET
+          resume_unit = EXCLUDED.resume_unit,
+          resume_updated_at = NOW()
+        RETURNING *;
+      `,
+      [userId, contentKey, resumeUnit]
+    );
+
+    const progress = await getUserContentProgress(userId);
+    const item =
+      progress.find((p) => p.contentKey === contentKey) || null;
+
+    return res.json({
+      ok: true,
+      item,
+    });
+  } catch (err) {
+    console.error("POST /progress/resume error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+    });
+  }
+});
 // POST /progress/update
 // Saves one completed unit. Progress can only move forward in sequence.
 app.post("/progress/update", authMiddleware, async (req, res) => {
