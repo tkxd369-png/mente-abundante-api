@@ -725,6 +725,8 @@ titleEs: row.title_es,
 titleEn: row.title_en,
 totalUnits,
 currentUnit,
+ resumeUnit: Number(row.resume_unit || 0),
+resumeUpdatedAt: row.resume_updated_at || null,
 percent,
 status: row.effective_status || row.status || "locked",
 unlockedAt: row.unlocked_at || null,
@@ -744,6 +746,8 @@ c.title_en,
 c.total_units,
 c.sort_order,
 COALESCE(p.current_unit, 0)::int AS current_unit,
+COALESCE(p.resume_unit, 0)::int AS resume_unit,
+p.resume_updated_at,
 CASE
 WHEN p.status IS NOT NULL THEN p.status
 WHEN c.content_key = 'ebook_abundance' THEN 'unlocked'
