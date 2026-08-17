@@ -1,4 +1,5 @@
- const express = require("express");
+
+const express = require("express");
 const Stripe = require("stripe");
 const { Pool } = require("pg");
 const router = express.Router();
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS stripe_checkout_access (
 id BIGSERIAL PRIMARY KEY,
 stripe_session_id TEXT UNIQUE NOT NULL,
 stripe_payment_intent TEXT,
+user_id BIGINT,
 email TEXT NOT NULL,
 full_name TEXT,
 phone TEXT,
@@ -49,6 +51,49 @@ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `);
 await pool.query(`
+ALTER TABLE stripe_checkout_access
+ADD COLUMN IF NOT EXISTS user_id BIGINT;
+`);
+await pool.query(`
+CREATE INDEX IF NOT EXISTS idx_stripe_checkout_access_user_id
+ON stripe_checkout_access (user_id);
+`);
+// Permanent account-email aliases. The server also ensures this table;
+// defining it here keeps duplicate-charge protection self-contained.
+await pool.query(`
+CREATE TABLE IF NOT EXISTS account_email_history (
+id BIGSERIAL PRIMARY KEY,
+user_id BIGINT NOT NULL,
+email TEXT NOT NULL,
+created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`);
+await pool.query(`
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_email_history_email
+ON account_email_history (LOWER(email));
+`);
+await pool.query(`
+CREATE INDEX IF NOT EXISTS idx_account_email_history_user_id
+ON account_email_history (user_id);
+`);
+// Reserve current account emails and backfill old consumed purchases.
+await pool.query(`
+INSERT INTO account_email_history (user_id, email)
+SELECT id, LOWER(email)
+FROM users
+WHERE email IS NOT NULL AND TRIM(email) <> ''
+ON CONFLICT DO NOTHING;
+`).catch(() => {});
+await pool.query(`
+UPDATE stripe_checkout_access AS sca
+SET user_id = u.id,
+updated_at = NOW()
+FROM users AS u
+WHERE sca.user_id IS NULL
+AND sca.signup_used = TRUE
+AND LOWER(sca.email) = LOWER(u.email);
+`).catch(() => {});
+await pool.query(`
 CREATE INDEX IF NOT EXISTS idx_stripe_checkout_access_email
 ON stripe_checkout_access (LOWER(email));
 `);
@@ -57,9 +102,11 @@ CREATE INDEX IF NOT EXISTS idx_stripe_checkout_access_ref_code
 ON stripe_checkout_access (ref_code);
 `);
 }
+let paymentsReady = Promise.resolve();
 if (pool) {
-ensurePaymentsTable().catch((err) => {
+paymentsReady = ensurePaymentsTable().catch((err) => {
 console.error("[payments] Could not initialize payments table:", err);
+throw err;
 });
 }
 function clean(value, max = 250) {
@@ -218,6 +265,7 @@ checkoutAmountCents: CHECKOUT_AMOUNT_CENTS,
 });
 router.post("/create-checkout", async (req, res) => {
 try {
+await paymentsReady;
 if (!stripe) {
 return res.status(503).json({ error: "Stripe is not configured." });
 }
@@ -242,9 +290,14 @@ const cancelUrl = getMembershipUrl(lang, refCode);
 // 1) If this email already owns an account, do not open Stripe again.
 const existingUser = await pool.query(
 `
-SELECT id
+SELECT id, email
 FROM users
 WHERE LOWER(email) = LOWER($1)
+UNION ALL
+SELECT u.id, u.email
+FROM account_email_history AS h
+JOIN users AS u ON u.id = h.user_id
+WHERE LOWER(h.email) = LOWER($1)
 LIMIT 1
 `,
 [email]
@@ -385,6 +438,7 @@ err.message
 return res.status(400).send(`Webhook Error: ${err.message}`);
 }
 try {
+await paymentsReady;
 switch (event.type) {
 case "checkout.session.completed": {
 const session = event.data.object;
@@ -418,6 +472,7 @@ return res.status(500).send("Webhook handler failed.");
 });
 router.get("/verify-session", async (req, res) => {
 try {
+await paymentsReady;
 if (!pool) {
 return res.status(503).json({ error: "Database is not configured." });
 }
@@ -522,4 +577,4 @@ ok: false,
 error: "Reactivation is not implemented.",
 });
 });
-module.exports = router;
+module.exports =  router;
