@@ -1113,6 +1113,177 @@ error: "Server error",
 client.release();
 }
 });
+// POST /progress/truth-path/quiz
+// Scores the WebBook comprehension quiz on the server.
+// Passing the quiz unlocks The Truth Path for this user_id.
+app.post("/progress/truth-path/quiz", authMiddleware, async (req, res) => {
+const client = await pool.connect();
+let transactionStarted = false;
+try {
+await contentProgressReady;
+const userId = req.userId;
+const answers = req.body?.answers || {};
+const ANSWERS = {
+q1: "C",
+q2: "C",
+q3: "B",
+q4: "B",
+q5: "B",
+q6: "C",
+q7: "C",
+};
+const TOTAL = 7;
+const PASS = 6;
+const normalizedAnswers = {};
+for (let i = 1; i <= TOTAL; i++) {
+const key = `q${i}`;
+const value = String(answers[key] || "").trim().toUpperCase();
+if (!["A", "B", "C", "D"].includes(value)) {
+return res.status(400).json({
+ok: false,
+code: "QUIZ_INCOMPLETE",
+error: "All quiz questions must be answered.",
+});
+}
+normalizedAnswers[key] = value;
+}
+await client.query("BEGIN");
+transactionStarted = true;
+// The quiz can unlock TTP only after the WebBook is officially complete.
+const ebookResult = await client.query(
+`
+SELECT
+p.current_unit,
+p.status,
+c.total_units
+FROM user_content_progress AS p
+JOIN content_catalog AS c
+ON c.content_key = p.content_key
+WHERE p.user_id = $1::bigint
+AND p.content_key = 'ebook_abundance'
+AND c.is_active = TRUE
+LIMIT 1
+FOR UPDATE;
+`,
+[userId]
+);
+if (ebookResult.rows.length === 0) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(403).json({
+ok: false,
+code: "EBOOK_NOT_COMPLETED",
+error: "Complete the WebBook before taking this quiz.",
+});
+}
+const ebook = ebookResult.rows[0];
+const ebookCurrentUnit = Number(ebook.current_unit || 0);
+const ebookTotalUnits = Number(ebook.total_units || 0);
+if (
+ebookCurrentUnit < ebookTotalUnits ||
+ebook.status !== "completed"
+) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(403).json({
+ok: false,
+code: "EBOOK_NOT_COMPLETED",
+error: "Complete the WebBook before unlocking The Truth Path.",
+currentUnit: ebookCurrentUnit,
+totalUnits: ebookTotalUnits,
+});
+}
+let score = 0;
+for (const key of Object.keys(ANSWERS)) {
+if (normalizedAnswers[key] === ANSWERS[key]) {
+score++;
+}
+}
+// A failed attempt does not change TTP access.
+if (score < PASS) {
+await client.query("COMMIT");
+transactionStarted = false;
+return res.json({
+ok: true,
+passed: false,
+score,
+total: TOTAL,
+required: PASS,
+});
+}
+// Passing is idempotent:
+// - locked/not-yet-created -> unlocked
+// - already unlocked/in_progress/completed -> keep existing status
+await client.query(
+`
+INSERT INTO user_content_progress (
+user_id,
+content_key,
+current_unit,
+status,
+unlocked_at,
+started_at,
+completed_at,
+resume_unit,
+resume_updated_at,
+updated_at
+)
+VALUES (
+$1::bigint,
+'truth_path',
+0,
+'unlocked',
+NOW(),
+NULL,
+NULL,
+0,
+NULL,
+NOW()
+)
+ON CONFLICT (user_id, content_key)
+DO UPDATE SET
+status = CASE
+WHEN user_content_progress.status = 'locked'
+THEN 'unlocked'
+ELSE user_content_progress.status
+END,
+unlocked_at = COALESCE(
+user_content_progress.unlocked_at,
+NOW()
+),
+updated_at = NOW();
+`,
+[userId]
+);
+await client.query("COMMIT");
+transactionStarted = false;
+const progress = await getUserContentProgress(userId);
+const truthPath =
+progress.find((p) => p.contentKey === "truth_path") || null;
+return res.json({
+ok: true,
+passed: true,
+score,
+total: TOTAL,
+required: PASS,
+truthPath,
+progress,
+});
+} catch (err) {
+if (transactionStarted) {
+try {
+await client.query("ROLLBACK");
+} catch (_) {}
+}
+console.error("POST /progress/truth-path/quiz error:", err);
+return res.status(500).json({
+ok: false,
+error: "Server error",
+});
+} finally {
+client.release();
+}
+});
 // =========================================================
 // END TMKP CONTENT PROGRESS - STEP 2
 // =========================================================
