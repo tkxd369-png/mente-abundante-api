@@ -14,10 +14,10 @@ const paymentsRouter = require("./routes/payments");
 // -------------------------
 const PORT = process.env.PORT || 3000;
 if (!process.env.DATABASE_URL) {
-console.error("nn Falta DATABASE_URL en .env");
+console.error("[WARN] Falta DATABASE_URL en .env");
 }
 if (!process.env.JWT_SECRET) {
-console.error("nn Falta JWT_SECRET en .env");
+console.error("[WARN] Falta JWT_SECRET en .env");
 }
 // -------------------------
 // Pool de PostgreSQL (Neon)
@@ -28,6 +28,85 @@ ssl: {
 rejectUnauthorized: false,
 },
 });
+const EMAIL_CHANGE_TTL_MINUTES = 15;
+const EMAIL_CHANGE_RESEND_SECONDS = 60;
+const EMAIL_CHANGE_MAX_ATTEMPTS = 5;
+function normalizeEmail(emailRaw) {
+return String(emailRaw || "").trim().toLowerCase();
+}
+function isValidEmail(email) {
+return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ""));
+}
+function hashEmailChangeCode(code) {
+return crypto
+.createHmac("sha256", process.env.JWT_SECRET || "tmkp-email-change")
+.update(String(code))
+.digest("hex");
+}
+async function ensureAccountSecurityTables() {
+try {
+// Permanent aliases/history for account emails. This lets TMKP remember
+// that an old email belongs to an existing member even after the member
+// changes the login email.
+await pool.query(`
+CREATE TABLE IF NOT EXISTS account_email_history (
+id BIGSERIAL PRIMARY KEY,
+user_id BIGINT NOT NULL,
+email TEXT NOT NULL,
+created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`);
+await pool.query(`
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_email_history_email
+ON account_email_history (LOWER(email));
+`);
+await pool.query(`
+CREATE INDEX IF NOT EXISTS idx_account_email_history_user_id
+ON account_email_history (user_id);
+`);
+// One active email-change request per user.
+await pool.query(`
+CREATE TABLE IF NOT EXISTS email_change_requests (
+user_id BIGINT PRIMARY KEY,
+new_email TEXT NOT NULL,
+code_hash TEXT NOT NULL,
+attempts INTEGER NOT NULL DEFAULT 0,
+expires_at TIMESTAMPTZ NOT NULL,
+last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`);
+// Stripe table is created by routes/payments.js. IF EXISTS makes this
+// safe even during a fresh startup.
+await pool.query(`
+ALTER TABLE IF EXISTS stripe_checkout_access
+ADD COLUMN IF NOT EXISTS user_id BIGINT;
+`);
+// Reserve all current account emails.
+await pool.query(`
+INSERT INTO account_email_history (user_id, email)
+SELECT id, LOWER(email)
+FROM users
+WHERE email IS NOT NULL AND TRIM(email) <> ''
+ON CONFLICT DO NOTHING;
+`);
+// Best-effort backfill for already-consumed Stripe payments created
+// before user_id linkage was added.
+await pool.query(`
+UPDATE stripe_checkout_access AS sca
+SET user_id = u.id,
+updated_at = NOW()
+FROM users AS u
+WHERE sca.user_id IS NULL
+AND sca.signup_used = TRUE
+AND LOWER(sca.email) = LOWER(u.email);
+`).catch(() => {});
+} catch (err) {
+console.error("ensureAccountSecurityTables error:", err);
+}
+}
+const accountSecurityReady = ensureAccountSecurityTables();
 // -------------------------
 // Middlewares globales
 // -------------------------
@@ -364,18 +443,30 @@ WHERE UPPER(refid) = $1;
 [referredby]
 );
 }
-// Consumir la compra. Desde este momento este sessionId ya no
-// puede utilizarse para crear otra cuenta.
+// Reserve the original purchase email as a permanent alias for
+// this membership, independent of future login-email changes.
+await client.query(
+`
+INSERT INTO account_email_history (user_id, email)
+VALUES ($1, LOWER($2))
+ON CONFLICT DO NOTHING;
+`,
+[newUser.id, normalizedEmail]
+);
+// Consume the purchase and permanently link it to the new user_id.
+// From this point forward the purchase belongs to the account even if
+// the member later changes the login email in Settings.
 const consumeResult = await client.query(
 `
 UPDATE stripe_checkout_access
-SET signup_used = TRUE,
+SET user_id = $2,
+signup_used = TRUE,
 signup_used_at = NOW(),
 updated_at = NOW()
 WHERE stripe_session_id = $1
 AND signup_used = FALSE;
 `,
-[String(sessionId).trim()]
+[String(sessionId).trim(), newUser.id]
 );
 if (consumeResult.rowCount !== 1) {
 throw new Error("Stripe Checkout Session could not be consumed.");
@@ -479,43 +570,534 @@ return res.status(500).json({ ok: false, error: "Server error" });
 app.post("/account/update-profile", authMiddleware, async (req, res) => {
 try {
 const { userId } = req;
-const { email, phone } = req.body || {};
-if (!email && !phone) {
-return res.status(400).json({
-ok: false,
-error: "Nada para actualizar (email o teléfono requeridos)",
-});
-}
-const fields = [];
-const values = [];
-let idx = 1;
-if (email) {
-fields.push(`email = $${idx++}`);
-values.push(String(email).trim().toLowerCase());
-}
-if (phone) {
-fields.push(`phone = $${idx++}`);
-values.push(normalizePhone(phone));
-}
-values.push(userId);
-const query = `
-UPDATE users
-SET ${fields.join(", ")}
-WHERE id = $${idx}
-RETURNING *;
-`;
-const { rows } = await pool.query(query, values);
-if (rows.length === 0) {
+const { fullName, email, phone, country, lang } = req.body || {};
+const currentResult = await pool.query(
+"SELECT * FROM users WHERE id = $1 LIMIT 1",
+[userId]
+);
+if (currentResult.rows.length === 0) {
 return res.status(404).json({ ok: false, error: "Usuario no encontrado" });
 }
-const updatedUser = buildUserResponse(rows[0]);
+const currentUser = currentResult.rows[0];
+// Email is never changed through this generic profile endpoint.
+// A different email must use the password + verification-code flow.
+if (email) {
+const requestedEmail = normalizeEmail(email);
+const currentEmail = normalizeEmail(currentUser.email);
+if (requestedEmail && requestedEmail !== currentEmail) {
+return res.status(409).json({
+ok: false,
+code: "EMAIL_REQUIRES_VERIFICATION",
+error:
+currentUser.lang === "en"
+? "Email changes require password confirmation and verification."
+: "Los cambios de email requieren contraseña y verificación.",
+});
+}
+}
+const normalizedFullName =
+fullName !== undefined ? String(fullName || "").trim() : null;
+const normalizedPhone =
+phone !== undefined ? normalizePhone(phone) : null;
+const normalizedCountry =
+country !== undefined
+? String(country || "").trim().toUpperCase().slice(0, 8)
+: null;
+const normalizedLang =
+lang !== undefined ? (String(lang).toLowerCase() === "en" ? "en" : "es") : null;
+if (fullName !== undefined && !normalizedFullName) {
+return res.status(400).json({
+ok: false,
+error:
+currentUser.lang === "en"
+? "Full name is required."
+: "El nombre completo es requerido.",
+});
+}
+const { rows } = await pool.query(
+`
+UPDATE users
+SET full_name = COALESCE($1, full_name),
+phone = COALESCE($2, phone),
+country = COALESCE($3, country),
+lang = COALESCE($4, lang)
+WHERE id = $5
+RETURNING *;
+`,
+[
+normalizedFullName,
+normalizedPhone,
+normalizedCountry,
+normalizedLang,
+userId,
+]
+);
 return res.json({
 ok: true,
-user: updatedUser,
+user: buildUserResponse(rows[0]),
 });
 } catch (err) {
 console.error("POST /account/update-profile error:", err);
 return res.status(500).json({ ok: false, error: "Server error" });
+}
+});
+// -------------------------
+// Cuenta: solicitar cambio de email
+// Requiere contraseña actual y envía un código al NUEVO correo.
+// -------------------------
+app.post("/account/request-email-change", authMiddleware, async (req, res) => {
+try {
+await accountSecurityReady;
+const { userId } = req;
+const newEmail = normalizeEmail(req.body?.newEmail);
+const currentPassword = String(req.body?.currentPassword || "");
+const { rows } = await pool.query(
+"SELECT * FROM users WHERE id = $1 LIMIT 1",
+[userId]
+);
+if (rows.length === 0) {
+return res.status(404).json({ ok: false, error: "Usuario no encontrado" });
+}
+const user = rows[0];
+const language = user.lang === "en" ? "en" : "es";
+if (!newEmail || !isValidEmail(newEmail)) {
+return res.status(400).json({
+ok: false,
+error: language === "en" ? "Enter a valid email." : "Ingresa un email válido.",
+});
+}
+if (!currentPassword) {
+return res.status(400).json({
+ok: false,
+error:
+language === "en"
+? "Your current password is required."
+: "Tu contraseña actual es requerida.",
+});
+}
+if (newEmail === normalizeEmail(user.email)) {
+return res.status(400).json({
+ok: false,
+error:
+language === "en"
+? "That is already your current email."
+: "Ese ya es tu email actual.",
+});
+}
+const passwordMatches = await bcrypt.compare(
+currentPassword,
+user.password_hash
+);
+if (!passwordMatches) {
+return res.status(401).json({
+ok: false,
+error:
+language === "en"
+? "Current password is incorrect."
+: "La contraseña actual es incorrecta.",
+});
+}
+// Current account conflict.
+const userConflict = await pool.query(
+`
+SELECT id
+FROM users
+WHERE LOWER(email) = LOWER($1)
+AND id <> $2
+LIMIT 1
+`,
+[newEmail, userId]
+);
+if (userConflict.rows.length > 0) {
+return res.status(409).json({
+ok: false,
+error:
+language === "en"
+? "That email is already being used by another account."
+: "Ese email ya está siendo utilizado por otra cuenta.",
+});
+}
+// Historical account alias conflict.
+const historyConflict = await pool.query(
+`
+SELECT user_id
+FROM account_email_history
+WHERE LOWER(email) = LOWER($1)
+AND user_id <> $2
+LIMIT 1
+`,
+[newEmail, userId]
+);
+if (historyConflict.rows.length > 0) {
+return res.status(409).json({
+ok: false,
+error:
+language === "en"
+? "That email is already associated with another membership."
+: "Ese email ya está asociado con otra membresía.",
+});
+}
+// Do not absorb an unfinished paid purchase that belongs to another
+// registration flow.
+const paymentConflict = await pool.query(
+`
+SELECT user_id
+FROM stripe_checkout_access
+WHERE LOWER(email) = LOWER($1)
+AND payment_status = 'paid'
+AND (user_id IS NULL OR user_id <> $2)
+LIMIT 1
+`,
+[newEmail, userId]
+).catch(() => ({ rows: [] }));
+if (paymentConflict.rows.length > 0) {
+return res.status(409).json({
+ok: false,
+error:
+language === "en"
+? "That email is already associated with another purchase."
+: "Ese email ya está asociado con otra compra.",
+});
+}
+// Simple resend cooldown.
+const existingRequest = await pool.query(
+`
+SELECT new_email, last_sent_at
+FROM email_change_requests
+WHERE user_id = $1
+LIMIT 1
+`,
+[userId]
+);
+if (existingRequest.rows.length > 0) {
+const row = existingRequest.rows[0];
+const lastSent = row.last_sent_at ? new Date(row.last_sent_at).getTime() : 0;
+const secondsAgo = Math.floor((Date.now() - lastSent) / 1000);
+if (
+normalizeEmail(row.new_email) === newEmail &&
+secondsAgo >= 0 &&
+secondsAgo < EMAIL_CHANGE_RESEND_SECONDS
+) {
+return res.status(429).json({
+ok: false,
+error:
+language === "en"
+? "Please wait a moment before requesting another code."
+: "Espera un momento antes de solicitar otro código.",
+});
+}
+}
+const code = crypto.randomInt(100000, 1000000).toString();
+const codeHash = hashEmailChangeCode(code);
+const expiresAt = new Date(
+Date.now() + EMAIL_CHANGE_TTL_MINUTES * 60 * 1000
+);
+await pool.query(
+`
+INSERT INTO email_change_requests (
+user_id,
+new_email,
+code_hash,
+attempts,
+expires_at,
+last_sent_at,
+created_at,
+updated_at
+)
+VALUES ($1,$2,$3,0,$4,NOW(),NOW(),NOW())
+ON CONFLICT (user_id)
+DO UPDATE SET
+new_email = EXCLUDED.new_email,
+code_hash = EXCLUDED.code_hash,
+attempts = 0,
+expires_at = EXCLUDED.expires_at,
+last_sent_at = NOW(),
+updated_at = NOW()
+`,
+[userId, newEmail, codeHash, expiresAt]
+);
+const subject =
+language === "en"
+? "Verify your new email"
+: "Verifica tu nuevo email";
+const html =
+language === "en"
+? `
+<div style="font-family:Arial,sans-serif;color:#222;line-height:1.6">
+<h2>The Master Key</h2>
+<p>Use this verification code to confirm your new email:</p>
+<div style="font-size:30px;font-weight:700;letter-spacing:8px;margin:24px 0;">${code}</div>
+<p>This code expires in ${EMAIL_CHANGE_TTL_MINUTES} minutes.</p>
+<p>If you did not request this change, you can ignore this email.</p>
+</div>
+`
+: `
+<div style="font-family:Arial,sans-serif;color:#222;line-height:1.6">
+<h2>The Master Key</h2>
+<p>Usa este código de verificación para confirmar tu nuevo email:</p>
+<div style="font-size:30px;font-weight:700;letter-spacing:8px;margin:24px 0;">${code}</div>
+<p>Este código expira en ${EMAIL_CHANGE_TTL_MINUTES} minutos.</p>
+<p>Si tú no solicitaste este cambio, puedes ignorar este correo.</p>
+</div>
+`;
+try {
+await resend.emails.send({
+from: "The Master Key <support@themasterkeyprogram.com>",
+to: newEmail,
+subject,
+html,
+});
+} catch (emailErr) {
+await pool.query(
+"DELETE FROM email_change_requests WHERE user_id = $1 AND LOWER(new_email) = LOWER($2)",
+[userId, newEmail]
+).catch(() => {});
+throw emailErr;
+}
+return res.json({
+ok: true,
+verificationRequired: true,
+expiresInMinutes: EMAIL_CHANGE_TTL_MINUTES,
+newEmail,
+});
+} catch (err) {
+console.error("POST /account/request-email-change error:", err);
+return res.status(500).json({ ok: false, error: "Server error" });
+}
+});
+// -------------------------
+// Cuenta: confirmar cambio de email
+// -------------------------
+app.post("/account/confirm-email-change", authMiddleware, async (req, res) => {
+const client = await pool.connect();
+let transactionStarted = false;
+try {
+await accountSecurityReady;
+const { userId } = req;
+const code = String(req.body?.code || "").trim();
+if (!/^\d{6}$/.test(code)) {
+return res.status(400).json({
+ok: false,
+error: "Invalid verification code.",
+});
+}
+await client.query("BEGIN");
+transactionStarted = true;
+const userResult = await client.query(
+"SELECT * FROM users WHERE id = $1 LIMIT 1 FOR UPDATE",
+[userId]
+);
+if (userResult.rows.length === 0) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(404).json({ ok: false, error: "Usuario no encontrado" });
+}
+const user = userResult.rows[0];
+const language = user.lang === "en" ? "en" : "es";
+const requestResult = await client.query(
+`
+SELECT *
+FROM email_change_requests
+WHERE user_id = $1
+LIMIT 1
+FOR UPDATE
+`,
+[userId]
+);
+if (requestResult.rows.length === 0) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(400).json({
+ok: false,
+error:
+language === "en"
+? "No email change is waiting for verification."
+: "No hay un cambio de email pendiente de verificación.",
+});
+}
+const request = requestResult.rows[0];
+if (new Date(request.expires_at).getTime() <= Date.now()) {
+await client.query(
+"DELETE FROM email_change_requests WHERE user_id = $1",
+[userId]
+);
+await client.query("COMMIT");
+transactionStarted = false;
+return res.status(400).json({
+ok: false,
+error:
+language === "en"
+? "The verification code has expired. Request a new one."
+: "El código de verificación expiró. Solicita uno nuevo.",
+});
+}
+if (Number(request.attempts || 0) >= EMAIL_CHANGE_MAX_ATTEMPTS) {
+await client.query(
+"DELETE FROM email_change_requests WHERE user_id = $1",
+[userId]
+);
+await client.query("COMMIT");
+transactionStarted = false;
+return res.status(429).json({
+ok: false,
+error:
+language === "en"
+? "Too many attempts. Request a new verification code."
+: "Demasiados intentos. Solicita un nuevo código.",
+});
+}
+const submittedHash = hashEmailChangeCode(code);
+if (submittedHash !== request.code_hash) {
+await client.query(
+`
+UPDATE email_change_requests
+SET attempts = attempts + 1,
+updated_at = NOW()
+WHERE user_id = $1
+`,
+[userId]
+);
+await client.query("COMMIT");
+transactionStarted = false;
+return res.status(400).json({
+ok: false,
+error:
+language === "en"
+? "Incorrect verification code."
+: "Código de verificación incorrecto.",
+});
+}
+const newEmail = normalizeEmail(request.new_email);
+// Re-check conflicts at confirmation time.
+const conflict = await client.query(
+`
+SELECT id
+FROM users
+WHERE LOWER(email) = LOWER($1)
+AND id <> $2
+LIMIT 1
+`,
+[newEmail, userId]
+);
+if (conflict.rows.length > 0) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(409).json({
+ok: false,
+error:
+language === "en"
+? "That email is already being used by another account."
+: "Ese email ya está siendo utilizado por otra cuenta.",
+});
+}
+const historyConflict = await client.query(
+`
+SELECT user_id
+FROM account_email_history
+WHERE LOWER(email) = LOWER($1)
+AND user_id <> $2
+LIMIT 1
+`,
+[newEmail, userId]
+);
+if (historyConflict.rows.length > 0) {
+await client.query("ROLLBACK");
+transactionStarted = false;
+return res.status(409).json({
+ok: false,
+error:
+language === "en"
+? "That email is already associated with another membership."
+: "Ese email ya está asociado con otra membresía.",
+});
+}
+// Preserve both the original/previous email and the new email as
+// permanent aliases for this membership. Stripe's historical receipt
+// email is intentionally not rewritten.
+await client.query(
+`
+INSERT INTO account_email_history (user_id, email)
+VALUES ($1, LOWER($2))
+ON CONFLICT DO NOTHING
+`,
+[userId, user.email]
+);
+await client.query(
+`
+INSERT INTO account_email_history (user_id, email)
+VALUES ($1, LOWER($2))
+ON CONFLICT DO NOTHING
+`,
+[userId, newEmail]
+);
+const updatedResult = await client.query(
+`
+UPDATE users
+SET email = $1
+WHERE id = $2
+RETURNING *;
+`,
+[newEmail, userId]
+);
+await client.query(
+"DELETE FROM email_change_requests WHERE user_id = $1",
+[userId]
+);
+await client.query("COMMIT");
+transactionStarted = false;
+// Security notice to the previous email. Failure to send this notice
+// does not undo a change that was already verified and committed.
+const oldEmail = normalizeEmail(user.email);
+if (oldEmail && oldEmail !== newEmail) {
+const noticeSubject =
+language === "en"
+? "Your TMKP email was changed"
+: "Tu email de TMKP fue cambiado";
+const noticeHtml =
+language === "en"
+? `
+<div style="font-family:Arial,sans-serif;color:#222;line-height:1.6">
+<h2>The Master Key</h2>
+<p>The email on your account was changed to <strong>${newEmail}</strong>.</p>
+<p>If you did not make this change, contact support immediately.</p>
+</div>
+`
+: `
+<div style="font-family:Arial,sans-serif;color:#222;line-height:1.6">
+<h2>The Master Key</h2>
+<p>El email de tu cuenta fue cambiado a <strong>${newEmail}</strong>.</p>
+<p>Si tú no realizaste este cambio, contacta a soporte inmediatamente.</p>
+</div>
+`;
+resend.emails.send({
+from: "The Master Key <support@themasterkeyprogram.com>",
+to: oldEmail,
+subject: noticeSubject,
+html: noticeHtml,
+}).catch((noticeErr) => {
+console.error("Email-change old-address notice failed:", noticeErr);
+});
+}
+return res.json({
+ok: true,
+user: buildUserResponse(updatedResult.rows[0]),
+});
+} catch (err) {
+if (transactionStarted) {
+try {
+await client.query("ROLLBACK");
+} catch (_) {}
+}
+console.error("POST /account/confirm-email-change error:", err);
+if (err && err.code === "23505") {
+return res.status(409).json({
+ok: false,
+error: "That email is already associated with another account.",
+});
+}
+return res.status(500).json({ ok: false, error: "Server error" });
+} finally {
+client.release();
 }
 });
 // -------------------------
@@ -757,8 +1339,7 @@ LIMIT 1;
 const oldestTs = oldest.rows[0]?.created_at;
 if (oldestTs) {
 // segundos hasta que ese pago salga de la ventana de 60 min
-const diff = await pool.query(`SELECT EXTRACT(EPOCH FROM (($1::timestamptz + INTERVAL '60 minutes') - NOW()))::int AS s;`,
-[oldestTs]);
+const diff = await pool.query(`SELECT EXTRACT(EPOCH FROM (($1::timestamptz + INTERVAL '60 minutes') - NOW()))::int AS s;`, [oldestTs]);
 retrySeconds = Math.max(diff.rows[0]?.s || 0, 0);
 } else {
 retrySeconds = 60 * 60;
@@ -930,7 +1511,6 @@ error: "Server error",
 });
 }
 });
-
 app.listen(PORT, () => {
-console.log(`n Mente Abundante API escuchando en el puerto ${PORT}`);
-}); 
+console.log(`[OK] Mente Abundante API escuchando en el puerto ${PORT}`);
+});
