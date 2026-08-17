@@ -183,6 +183,11 @@ await pool.query(`
 CREATE INDEX IF NOT EXISTS idx_user_content_progress_updated_at
 ON user_content_progress (updated_at DESC);
 `);
+ await pool.query(`
+  ALTER TABLE user_content_progress
+  ADD COLUMN IF NOT EXISTS resume_unit INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS resume_updated_at TIMESTAMPTZ;
+`);
 // Seed/update only the content catalog.
 // This creates TWO tiny catalog rows, not rows for every member.
 for (const item of CONTENT_PROGRESS_DEFINITIONS) {
