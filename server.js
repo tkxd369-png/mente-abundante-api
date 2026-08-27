@@ -617,6 +617,96 @@ throw new Error("Stripe Checkout Session could not be consumed.");
 }
 await client.query("COMMIT");
 transactionStarted = false;
+// Email especial: solamente cuando el patrocinador recibe su PRIMER referido.
+// Se envía después del COMMIT para que una falla de email nunca deshaga
+// la cuenta recién creada ni el crédito del referido.
+if (
+sponsorAfterReferral &&
+Number(sponsorAfterReferral.referrals || 0) === 1 &&
+sponsorAfterReferral.email
+) {
+try {
+const sponsorLang = sponsorAfterReferral.lang === "en" ? "en" : "es";
+const dashboardUrl = "https://themasterkeyprogram.com/dashboard.html";
+
+const subject =
+sponsorLang === "en"
+? "We received your first referral! \u{1F389}"
+: "¡Recibimos tu primer referido! \u{1F389}";
+
+const html =
+sponsorLang === "en"
+? `
+<div style="font-family:Arial,sans-serif;color:#222;line-height:1.65;max-width:640px;margin:0 auto;">
+<h2 style="color:#111;">The Master Key Program</h2>
+<p><strong>We received your first referral! \u{1F389}</strong></p>
+<p>Your first referral has been recorded successfully and is now under review.</p>
+<p>The review process may take <strong>3–7 business days</strong>. Once the referral is approved, you will receive a confirmation email.</p>
+<p><strong>Important:</strong> this email confirms that the referral was received. It does not mean that a reward has been approved yet.</p>
+<p>To avoid sending you an email for every referral, after this first notification you will receive a <strong>weekly summary only when there is activity</strong> on your referral account.</p>
+<p>You can also check your referrals and their status at any time from your Dashboard.</p>
+<p>
+<a href="${dashboardUrl}"
+style="display:inline-block;padding:12px 24px;background:#d4af37;color:#000;text-decoration:none;border-radius:999px;font-weight:700;">
+View My Dashboard
+</a>
+</p>
+<p>Thank you for sharing The Master Key Program.</p>
+</div>
+`
+: `
+<div style="font-family:Arial,sans-serif;color:#222;line-height:1.65;max-width:640px;margin:0 auto;">
+<h2 style="color:#111;">The Master Key Program</h2>
+<p><strong>¡Recibimos tu primer referido! \u{1F389}</strong></p>
+<p>Tu primer referido ha sido registrado correctamente y ahora se encuentra bajo revisión.</p>
+<p>El proceso de revisión puede tomar de <strong>3 a 7 días hábiles</strong>. Cuando el referido sea aprobado, recibirás un email de confirmación.</p>
+<p><strong>Importante:</strong> este correo confirma que el referido fue recibido. Todavía no significa que una recompensa haya sido aprobada.</p>
+<p>Para evitar enviarte un correo por cada referido, después de este primer aviso recibirás un <strong>resumen semanal únicamente cuando haya actividad</strong> en tu cuenta de referidos.</p>
+<p>También puedes consultar tus referidos y su estado en cualquier momento desde tu Dashboard.</p>
+<p>
+<a href="${dashboardUrl}"
+style="display:inline-block;padding:12px 24px;background:#d4af37;color:#000;text-decoration:none;border-radius:999px;font-weight:700;">
+Ver mi Dashboard
+</a>
+</p>
+<p>Gracias por compartir The Master Key Program.</p>
+</div>
+`;
+
+const emailText =
+sponsorLang === "en"
+? `We received your first referral! \u{1F389}
+Your first referral has been recorded and is under review.
+The review process may take 3–7 business days.
+Once approved, you will receive a confirmation email.
+This message confirms receipt only; it does not mean that a reward has been approved yet.
+After this first notice, you will receive a weekly summary only when there is activity.
+You can also check your referral status anytime from your Dashboard:
+${dashboardUrl}`
+: `¡Recibimos tu primer referido! \u{1F389}
+Tu primer referido ha sido registrado y está bajo revisión.
+El proceso puede tomar de 3 a 7 días hábiles.
+Cuando sea aprobado, recibirás un email de confirmación.
+Este mensaje confirma únicamente la recepción; todavía no significa que una recompensa haya sido aprobada.
+Después de este primer aviso, recibirás un resumen semanal únicamente cuando haya actividad.
+También puedes consultar el estado de tus referidos en cualquier momento desde tu Dashboard:
+${dashboardUrl}`;
+
+const firstReferralEmail = await resend.emails.send({
+from: "The Master Key <support@themasterkeyprogram.com>",
+to: sponsorAfterReferral.email,
+subject,
+html,
+text: emailText,
+});
+
+if (firstReferralEmail && firstReferralEmail.error) {
+console.error("First-referral email failed:", firstReferralEmail.error);
+}
+} catch (firstReferralEmailErr) {
+console.error("First-referral email failed:", firstReferralEmailErr);
+}
+} 
 const token = createToken(newUser);
 const userResp = buildUserResponse(newUser);
 return res.status(201).json({
