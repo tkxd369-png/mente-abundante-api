@@ -1,14 +1,17 @@
-
-const express = require("express");
+ const express = require("express");
 const Stripe = require("stripe");
 const { Pool } = require("pg");
+const Resend = require("resend").Resend;
 const router = express.Router();
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 if (!STRIPE_SECRET_KEY) console.warn("[payments] STRIPE_SECRET_KEY is not configured.");
 if (!DATABASE_URL) console.warn("[payments] DATABASE_URL is not configured.");
+if (!RESEND_API_KEY) console.warn("[payments] RESEND_API_KEY is not configured; payment continuation emails will be skipped.");
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 const pool = DATABASE_URL
 ? new Pool({
 connectionString: DATABASE_URL,
@@ -46,6 +49,7 @@ payment_status TEXT NOT NULL DEFAULT 'pending',
 paid_at TIMESTAMPTZ,
 signup_used BOOLEAN NOT NULL DEFAULT FALSE,
 signup_used_at TIMESTAMPTZ,
+continuation_email_sent_at TIMESTAMPTZ,
 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -53,6 +57,10 @@ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 await pool.query(`
 ALTER TABLE stripe_checkout_access
 ADD COLUMN IF NOT EXISTS user_id BIGINT;
+`);
+await pool.query(`
+ALTER TABLE stripe_checkout_access
+ADD COLUMN IF NOT EXISTS continuation_email_sent_at TIMESTAMPTZ;
 `);
 await pool.query(`
 CREATE INDEX IF NOT EXISTS idx_stripe_checkout_access_user_id
@@ -127,6 +135,115 @@ function getMembershipUrl(lang, refCode) {
 const page = lang === "en" ? "membresia-en.html" : "membresia.html";
 const base = `${SITE_URL}/${page}`;
 return refCode ? `${base}?ref=${encodeURIComponent(refCode)}` : base;
+}
+function escapeHtml(value) {
+return String(value || "")
+.replace(/&/g, "&amp;")
+.replace(/</g, "&lt;")
+.replace(/>/g, "&gt;")
+.replace(/"/g, "&quot;")
+.replace(/'/g, "&#039;");
+}
+async function sendPaymentContinuationEmailIfNeeded(sessionId) {
+if (!pool) throw new Error("Database is not configured.");
+if (!resend) {
+console.warn(
+`[payments/email] RESEND_API_KEY is not configured; continuation email skipped for ${sessionId}.`
+);
+return;
+}
+const { rows } = await pool.query(
+`
+SELECT
+stripe_session_id,
+email,
+full_name,
+lang,
+payment_status,
+signup_used,
+continuation_email_sent_at
+FROM stripe_checkout_access
+WHERE stripe_session_id = $1
+LIMIT 1;
+`,
+[sessionId]
+);
+if (!rows.length) return;
+const row = rows[0];
+if (row.payment_status !== "paid") return;
+if (row.signup_used) return;
+if (row.continuation_email_sent_at) return;
+const lang = normalizeLang(row.lang);
+const signupUrl = `${getSignupUrl(lang)}?session_id=${encodeURIComponent(
+sessionId
+)}`;
+const safeName = escapeHtml(row.full_name || "");
+const firstName = safeName ? safeName.split(/\s+/)[0] : "";
+const subject =
+lang === "en"
+? "Payment confirmed — continue your TMKP registration"
+: "Pago confirmado — continúa tu registro de TMKP";
+const html =
+lang === "en"
+? `
+<div style="font-family:Arial,sans-serif;color:#222;line-height:1.6;max-width:620px;margin:0 auto;">
+<h2 style="margin-bottom:8px;">The Master Key Program</h2>
+<p>${firstName ? `Hi ${firstName},` : "Hello,"}</p>
+<p>Your payment has been confirmed and your access is reserved.</p>
+<p>Complete your registration to create your account and continue into The Master Key Program.</p>
+<p style="margin:28px 0;">
+<a href="${signupUrl}" style="display:inline-block;padding:13px 24px;background:#d4af37;color:#111;text-decoration:none;border-radius:999px;font-weight:700;">Continue my registration</a>
+</p>
+<p style="font-size:14px;color:#666;">This link is tied to your confirmed payment and can only be used to create one account.</p>
+<p style="font-size:14px;color:#666;">If you already completed your registration, you can ignore this email.</p>
+<p style="margin-top:28px;">The Master Key Program</p>
+</div>
+`
+: `
+<div style="font-family:Arial,sans-serif;color:#222;line-height:1.6;max-width:620px;margin:0 auto;">
+<h2 style="margin-bottom:8px;">The Master Key Program</h2>
+<p>${firstName ? `Hola ${firstName},` : "Hola,"}</p>
+<p>Tu pago ha sido confirmado y tu acceso está reservado.</p>
+<p>Completa tu registro para crear tu cuenta y continuar dentro de The Master Key Program.</p>
+<p style="margin:28px 0;">
+<a href="${signupUrl}" style="display:inline-block;padding:13px 24px;background:#d4af37;color:#111;text-decoration:none;border-radius:999px;font-weight:700;">Continuar mi registro</a>
+</p>
+<p style="font-size:14px;color:#666;">Este enlace está asociado a tu pago confirmado y solo puede utilizarse para crear una cuenta.</p>
+<p style="font-size:14px;color:#666;">Si ya completaste tu registro, puedes ignorar este correo.</p>
+<p style="margin-top:28px;">The Master Key Program</p>
+</div>
+`;
+const text =
+lang === "en"
+? `${firstName ? `Hi ${firstName},\n\n` : "Hello,\n\n"}Your payment has been confirmed and your access is reserved.\n\nComplete your registration here:\n${signupUrl}\n\nThis link is tied to your confirmed payment and can only be used to create one account.\n\nThe Master Key Program`
+: `${firstName ? `Hola ${firstName},\n\n` : "Hola,\n\n"}Tu pago ha sido confirmado y tu acceso está reservado.\n\nCompleta tu registro aquí:\n${signupUrl}\n\nEste enlace está asociado a tu pago confirmado y solo puede utilizarse para crear una cuenta.\n\nThe Master Key Program`;
+const emailResult = await resend.emails.send(
+{
+from: "The Master Key <support@themasterkeyprogram.com>",
+to: row.email,
+subject,
+html,
+text,
+},
+{
+idempotencyKey: `tmkp-payment-continuation/${sessionId}`,
+}
+);
+if (emailResult && emailResult.error) {
+const message =
+emailResult.error.message || JSON.stringify(emailResult.error);
+throw new Error(`Resend continuation email failed: ${message}`);
+}
+await pool.query(
+`
+UPDATE stripe_checkout_access
+SET continuation_email_sent_at = COALESCE(continuation_email_sent_at, NOW()),
+updated_at = NOW()
+WHERE stripe_session_id = $1;
+`,
+[sessionId]
+);
+console.log(`[payments/email] Continuation email sent for ${sessionId}.`);
 }
 async function upsertCheckoutRecord(session, fallback = {}) {
 if (!pool) throw new Error("Database is not configured.");
@@ -257,6 +374,7 @@ module: "payments",
 stripeConfigured: !!stripe,
 webhookConfigured: !!STRIPE_WEBHOOK_SECRET,
 databaseConfigured: !!pool,
+emailConfigured: !!resend,
 mode: STRIPE_SECRET_KEY.startsWith("sk_test_")
 ? "test"
 : "live-or-unknown",
@@ -443,12 +561,14 @@ switch (event.type) {
 case "checkout.session.completed": {
 const session = event.data.object;
 await upsertCheckoutRecord(session);
+await sendPaymentContinuationEmailIfNeeded(session.id);
 break;
 }
 case "checkout.session.async_payment_succeeded": {
 const session = event.data.object;
 session.payment_status = "paid";
 await upsertCheckoutRecord(session);
+await sendPaymentContinuationEmailIfNeeded(session.id);
 break;
 }
 case "checkout.session.async_payment_failed": {
@@ -577,4 +697,4 @@ ok: false,
 error: "Reactivation is not implemented.",
 });
 });
-module.exports =  router;
+module.exports = router;
