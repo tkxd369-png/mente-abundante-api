@@ -569,16 +569,24 @@ normalizedCountry || null,
 const { rows } = await client.query(insertQuery, insertValues);
 const newUser = rows[0];
 // Crédito al patrocinador dentro de la misma transacción.
+// Guardamos el estado actualizado para detectar únicamente el PRIMER referido.
+let sponsorAfterReferral = null;
+
 if (referredby) {
-await client.query(
+const sponsorResult = await client.query(
 `
 UPDATE users
 SET referrals = COALESCE(referrals, 0) + 1
-WHERE UPPER(refid) = $1;
+WHERE UPPER(refid) = $1
+RETURNING id, email, full_name, lang, referrals;
 `,
 [referredby]
 );
+
+if (sponsorResult.rows.length > 0) {
+sponsorAfterReferral = sponsorResult.rows[0];
 }
+} 
 // Reserve the original purchase email as a permanent alias for
 // this membership, independent of future login-email changes.
 await client.query(
