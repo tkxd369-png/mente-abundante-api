@@ -50,6 +50,10 @@ paid_at TIMESTAMPTZ,
 signup_used BOOLEAN NOT NULL DEFAULT FALSE,
 signup_used_at TIMESTAMPTZ,
 continuation_email_sent_at TIMESTAMPTZ,
+referral_status TEXT NOT NULL DEFAULT 'none',
+referral_review_after TIMESTAMPTZ,
+referral_approved_at TIMESTAMPTZ,
+referral_approval_email_sent_at TIMESTAMPTZ,
 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -61,6 +65,13 @@ ADD COLUMN IF NOT EXISTS user_id BIGINT;
 await pool.query(`
 ALTER TABLE stripe_checkout_access
 ADD COLUMN IF NOT EXISTS continuation_email_sent_at TIMESTAMPTZ;
+`);
+ await pool.query(`
+ALTER TABLE stripe_checkout_access
+ADD COLUMN IF NOT EXISTS referral_status TEXT NOT NULL DEFAULT 'none',
+ADD COLUMN IF NOT EXISTS referral_review_after TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS referral_approved_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS referral_approval_email_sent_at TIMESTAMPTZ;
 `);
 await pool.query(`
 CREATE INDEX IF NOT EXISTS idx_stripe_checkout_access_user_id
