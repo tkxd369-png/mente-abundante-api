@@ -204,14 +204,14 @@ const dashboardUrl = `${SITE_URL}/dashboard.html`;
 const name = escapeHtml(firstName(row.sponsor_name));
 const subject =
 lang === "en"
-? "Your first referral has been approved! n"
-: "¡Tu primer referido ha sido aprobado! n";
+"Your first referral has been approved! \u2705" 
+"¡Tu primer referido ha sido aprobado! \u2705" 
 const html =
 lang === "en"
 ? `
 <div style="font-family:Arial,sans-serif;color:#222;line-height:1.65;max-width:640px;margin:0 auto;">
 <h2 style="color:#111;">The Master Key Program</h2>
-<p><strong>${name ? `${name}, y` : "Y"}our first referral has been approved! n</strong></p>
+<p><strong>${name ? `${name}, y` : "Y"}our first referral has been approved! \u2705</strong></p>
 <p>Your first referral has completed the verification period and is now marked as <strong>Qualified</strong>.</p>
 <p>The associated referral reward is now approved and will be handled according to the applicable TMKP payout schedule.</p>
 <p>You can review your referral activity and current status at any time from your Dashboard.</p>
@@ -227,7 +227,7 @@ View My Dashboard
 : `
 <div style="font-family:Arial,sans-serif;color:#222;line-height:1.65;max-width:640px;margin:0 auto;">
 <h2 style="color:#111;">The Master Key Program</h2>
-<p><strong>${name ? `${name}, ¡t` : "¡T"}u primer referido ha sido aprobado! n</strong></p>
+<p><strong>${name ? `${name}, ¡t` : "¡T"}u primer referido ha sido aprobado! \u2705</strong></p>
 <p>Tu primer referido completó el periodo de verificación y ahora está marcado como <strong>Calificado</strong>.</p>
 <p>La recompensa correspondiente a este referido queda aprobada y será procesada conforme al calendario de pagos aplicable de TMKP.</p>
 <p>Puedes consultar tu actividad de referidos y su estado actual en cualquier momento desde tu Dashboard.</p>
