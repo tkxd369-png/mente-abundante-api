@@ -137,6 +137,22 @@ return clean(value, 320).toLowerCase();
 function normalizeLang(value) {
 return clean(value, 5).toLowerCase() === "en" ? "en" : "es";
 }
+function addBusinessDays(startDate, businessDays) {
+const result = new Date(startDate);
+let remaining = Number(businessDays) || 0;
+
+while (remaining > 0) {
+result.setUTCDate(result.getUTCDate() + 1);
+
+const day = result.getUTCDay();
+
+if (day !== 0 && day !== 6) {
+remaining -= 1;
+}
+}
+
+return result;
+}
 function getSignupUrl(lang) {
 return lang === "en"
 ? `${SITE_URL}/signup-en.html`
@@ -365,6 +381,24 @@ clean(session.currency || "usd", 10).toLowerCase(),
 status,
 ]
 );
+if (refCode && status === "paid") {
+const referralReviewAfter = addBusinessDays(new Date(), 5);
+
+await pool.query(
+`
+UPDATE stripe_checkout_access
+SET referral_status = CASE
+WHEN referral_status = 'none' THEN 'pending'
+ELSE referral_status
+END,
+referral_review_after = COALESCE(referral_review_after, $2),
+updated_at = NOW()
+WHERE stripe_session_id = $1
+AND referral_status IN ('none', 'pending');
+`,
+[session.id, referralReviewAfter]
+);
+} 
 }
 async function setCheckoutStatus(sessionId, status) {
 if (!pool) return;
