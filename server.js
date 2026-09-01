@@ -872,6 +872,90 @@ app.get("/referrals/summary", authMiddleware, async (req, res) => {
     });
   }
 });
+// -------------------------
+// REFERRALS: actividad del miembro
+// -------------------------
+app.get("/referrals/activity", authMiddleware, async (req, res) => {
+  try {
+    const userResult = await pool.query(
+      `
+      SELECT refid
+      FROM users
+      WHERE id = $1
+      LIMIT 1;
+      `,
+      [req.userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: "Usuario no encontrado",
+      });
+    }
+
+    const refCode = String(userResult.rows[0].refid || "")
+      .trim()
+      .toUpperCase();
+
+    if (!refCode) {
+      return res.json({
+        ok: true,
+        referrals: [],
+      });
+    }
+
+    const activityResult = await pool.query(
+      `
+      SELECT
+        email,
+        referral_status,
+        COALESCE(signup_used_at, created_at) AS joined_at
+      FROM stripe_checkout_access
+      WHERE UPPER(ref_code) = $1
+        AND payment_status = 'paid'
+        AND signup_used = TRUE
+        AND user_id IS NOT NULL
+        AND referral_status IN ('pending', 'qualified')
+      ORDER BY COALESCE(signup_used_at, created_at) DESC
+      LIMIT 100;
+      `,
+      [refCode]
+    );
+
+    const referrals = activityResult.rows.map((row) => {
+      const rawEmail = String(row.email || "").trim().toLowerCase();
+      const at = rawEmail.indexOf("@");
+
+      let maskedEmail = rawEmail;
+
+      if (at > 0) {
+        const local = rawEmail.slice(0, at);
+        const domain = rawEmail.slice(at + 1);
+
+        maskedEmail = `${local.slice(0, 1)}***@${domain}`;
+      }
+
+      return {
+        email: maskedEmail,
+        status: row.referral_status,
+        joinedAt: row.joined_at,
+      };
+    });
+
+    return res.json({
+      ok: true,
+      referrals,
+    });
+  } catch (err) {
+    console.error("GET /referrals/activity error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+    });
+  }
+});
 // =========================================================
 // TMKP CONTENT PROGRESS - STEP 2
 // Member progress endpoints.
