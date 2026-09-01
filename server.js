@@ -798,6 +798,80 @@ console.error("GET /me error:", err);
 return res.status(500).json({ ok: false, error: "Server error" });
 }
 });
+// -------------------------
+// REFERRALS: resumen real del miembro
+// -------------------------
+app.get("/referrals/summary", authMiddleware, async (req, res) => {
+  try {
+    const userResult = await pool.query(
+      `
+      SELECT refid
+      FROM users
+      WHERE id = $1
+      LIMIT 1;
+      `,
+      [req.userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: "Usuario no encontrado",
+      });
+    }
+
+    const refCode = String(userResult.rows[0].refid || "")
+      .trim()
+      .toUpperCase();
+
+    if (!refCode) {
+      return res.json({
+        ok: true,
+        total: 0,
+        pending: 0,
+        qualified: 0,
+      });
+    }
+
+    const summaryResult = await pool.query(
+      `
+      SELECT
+         COUNT(*)::int AS total,
+
+        COUNT(*) FILTER (
+          WHERE referral_status = 'pending'
+        )::int AS pending,
+
+        COUNT(*) FILTER (
+          WHERE referral_status = 'qualified'
+        )::int AS qualified
+
+      FROM stripe_checkout_access
+      WHERE UPPER(ref_code) = $1
+        AND payment_status = 'paid'
+        AND signup_used = TRUE
+        AND user_id IS NOT NULL;
+      `,
+      [refCode]
+    );
+
+    const summary = summaryResult.rows[0] || {};
+
+    return res.json({
+      ok: true,
+      total: Number(summary.total || 0),
+      pending: Number(summary.pending || 0),
+      qualified: Number(summary.qualified || 0),
+    });
+  } catch (err) {
+    console.error("GET /referrals/summary error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+    });
+  }
+});
 // =========================================================
 // TMKP CONTENT PROGRESS - STEP 2
 // Member progress endpoints.
