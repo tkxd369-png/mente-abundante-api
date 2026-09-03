@@ -252,8 +252,10 @@ subject,
 html,
 text,
 },
-{
-idempotencyKey: `tmkp-payment-continuation/${sessionId}`,
+ {
+  idempotencyKey: forceResend
+    ? `tmkp-payment-continuation/${sessionId}/resend-${Date.now()}`
+    : `tmkp-payment-continuation/${sessionId}/initial`,
 }
 );
 if (emailResult && emailResult.error) {
@@ -264,11 +266,14 @@ throw new Error(`Resend continuation email failed: ${message}`);
 await pool.query(
 `
 UPDATE stripe_checkout_access
-SET continuation_email_sent_at = COALESCE(continuation_email_sent_at, NOW()),
+SET continuation_email_sent_at = CASE
+  WHEN $2::boolean = TRUE THEN NOW()
+  ELSE COALESCE(continuation_email_sent_at, NOW())
+END, 
 updated_at = NOW()
 WHERE stripe_session_id = $1;
 `,
-[sessionId]
+[sessionId, forceResend] 
 );
 console.log(`[payments/email] Continuation email sent for ${sessionId}.`);
 }
