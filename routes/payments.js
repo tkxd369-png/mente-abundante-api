@@ -171,7 +171,7 @@ return String(value || "")
 .replace(/"/g, "&quot;")
 .replace(/'/g, "&#039;");
 }
-async function sendPaymentContinuationEmailIfNeeded(sessionId) {
+async function sendPaymentContinuationEmailIfNeeded(sessionId, forceResend = false) { 
 if (!pool) throw new Error("Database is not configured.");
 if (!resend) {
 console.warn(
@@ -199,7 +199,7 @@ if (!rows.length) return;
 const row = rows[0];
 if (row.payment_status !== "paid") return;
 if (row.signup_used) return;
-if (row.continuation_email_sent_at) return;
+if (row.continuation_email_sent_at && !forceResend) return; 
 const lang = normalizeLang(row.lang);
 const signupUrl = `${getSignupUrl(lang)}?session_id=${encodeURIComponent(
 sessionId
