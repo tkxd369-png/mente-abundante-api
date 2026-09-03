@@ -43,6 +43,12 @@ return crypto
 .update(String(code))
 .digest("hex");
 }
+function hashContinuationToken(token) {
+  return crypto
+    .createHash("sha256")
+    .update(String(token || ""))
+    .digest("hex");
+} 
 async function ensureAccountSecurityTables() {
 try {
 // Permanent aliases/history for account emails. This lets TMKP remember
@@ -498,6 +504,29 @@ ok: false,
 error: "Este pago ya fue utilizado para crear una cuenta.",
 });
 }
+const providedTokenHash = hashContinuationToken(continuationToken);
+const storedTokenHash = String(checkout.continuation_token_hash || "");
+
+const tokenMatches =
+  /^[a-f0-9]{64}$/i.test(storedTokenHash) &&
+  crypto.timingSafeEqual(
+    Buffer.from(storedTokenHash, "hex"),
+    Buffer.from(providedTokenHash, "hex")
+  );
+
+if (!tokenMatches) {
+  await client.query("ROLLBACK");
+  transactionStarted = false;
+
+  return res.status(403).json({
+    ok: false,
+    code: "INVALID_VERIFICATION_TOKEN",
+    error:
+      checkout.lang === "en"
+        ? "This verification link is no longer valid."
+        : "Este enlace de verificación ya no es válido.",
+  });
+} 
 if (!checkout.continuation_email_sent_at) {
   await client.query("ROLLBACK");
   transactionStarted = false;
