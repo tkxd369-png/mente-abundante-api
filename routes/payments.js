@@ -1,5 +1,6 @@
  const express = require("express");
 const Stripe = require("stripe");
+const crypto = require("crypto");
 const { Pool } = require("pg");
 const Resend = require("resend").Resend;
 const router = express.Router();
@@ -50,6 +51,7 @@ paid_at TIMESTAMPTZ,
 signup_used BOOLEAN NOT NULL DEFAULT FALSE,
 signup_used_at TIMESTAMPTZ,
 continuation_email_sent_at TIMESTAMPTZ,
+continuation_token_hash TEXT,
 referral_status TEXT NOT NULL DEFAULT 'none',
 referral_review_after TIMESTAMPTZ,
 referral_approved_at TIMESTAMPTZ,
@@ -65,6 +67,10 @@ ADD COLUMN IF NOT EXISTS user_id BIGINT;
 await pool.query(`
 ALTER TABLE stripe_checkout_access
 ADD COLUMN IF NOT EXISTS continuation_email_sent_at TIMESTAMPTZ;
+`);
+ await pool.query(`
+ALTER TABLE stripe_checkout_access
+ADD COLUMN IF NOT EXISTS continuation_token_hash TEXT;
 `);
  await pool.query(`
 ALTER TABLE stripe_checkout_access
@@ -171,6 +177,12 @@ return String(value || "")
 .replace(/"/g, "&quot;")
 .replace(/'/g, "&#039;");
 }
+function hashContinuationToken(token) {
+  return crypto
+    .createHash("sha256")
+    .update(String(token || ""))
+    .digest("hex");
+}
 async function sendPaymentContinuationEmailIfNeeded(sessionId, forceResend = false) { 
 if (!pool) throw new Error("Database is not configured.");
 if (!resend) {
@@ -201,9 +213,11 @@ if (row.payment_status !== "paid") return;
 if (row.signup_used) return;
 if (row.continuation_email_sent_at && !forceResend) return; 
 const lang = normalizeLang(row.lang);
-const signupUrl = `${getSignupUrl(lang)}?session_id=${encodeURIComponent(
-sessionId
-)}`;
+ const continuationToken = crypto.randomBytes(32).toString("hex");
+const continuationTokenHash = hashContinuationToken(continuationToken);
+ const signupUrl =
+  `${getSignupUrl(lang)}?session_id=${encodeURIComponent(sessionId)}` +
+  `&token=${encodeURIComponent(continuationToken)}`;
 const safeName = escapeHtml(row.full_name || "");
 const firstName = safeName ? safeName.split(/\s+/)[0] : "";
 const subject =
@@ -269,11 +283,12 @@ UPDATE stripe_checkout_access
 SET continuation_email_sent_at = CASE
   WHEN $2::boolean = TRUE THEN NOW()
   ELSE COALESCE(continuation_email_sent_at, NOW())
-END, 
-updated_at = NOW()
+END,
+continuation_token_hash = $3,
+updated_at = NOW() 
 WHERE stripe_session_id = $1;
-`,
-[sessionId, forceResend] 
+`, 
+ [sessionId, forceResend, continuationTokenHash]
 );
 console.log(`[payments/email] Continuation email sent for ${sessionId}.`);
 }
@@ -752,7 +767,12 @@ if (!pool) {
 return res.status(503).json({ error: "Database is not configured." });
 }
 const sessionId = clean(req.query?.session_id, 255);
-if (!sessionId || !sessionId.startsWith("cs_")) {
+const continuationToken = clean(req.query?.token, 128); 
+ if (
+  !sessionId ||
+  !sessionId.startsWith("cs_") ||
+  !continuationToken
+) {
 return res.status(400).json({
 authorized: false,
 error: "Invalid Checkout Session.",
@@ -772,7 +792,8 @@ amount_total,
 currency,
 payment_status,
 signup_used,
-continuation_email_sent_at 
+continuation_email_sent_at,
+continuation_token_hash 
 FROM stripe_checkout_access
 WHERE stripe_session_id = $1
 LIMIT 1
@@ -786,6 +807,23 @@ error: "Checkout Session was not found.",
 });
 }
 const row = result.rows[0];
+const providedTokenHash = hashContinuationToken(continuationToken);
+const storedTokenHash = String(row.continuation_token_hash || "");
+
+const tokenMatches =
+  /^[a-f0-9]{64}$/i.test(storedTokenHash) &&
+  crypto.timingSafeEqual(
+    Buffer.from(storedTokenHash, "hex"),
+    Buffer.from(providedTokenHash, "hex")
+  );
+
+if (!tokenMatches) {
+  return res.status(403).json({
+    authorized: false,
+    code: "INVALID_VERIFICATION_TOKEN",
+    error: "This verification link is no longer valid.",
+  });
+} 
 if (row.payment_status !== "paid") {
 return res.status(402).json({
 authorized: false,
