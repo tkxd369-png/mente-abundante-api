@@ -426,12 +426,17 @@ app.post("/auth/create-account", async (req, res) => {
 const client = await pool.connect();
 let transactionStarted = false;
 try {
-const {
-sessionId,
-password,
-username: usernameRaw,
+ const {
+  sessionId,
+  continuationToken,
+  password,
+  username: usernameRaw,
 } = req.body || {};
-if (!sessionId || !String(sessionId).startsWith("cs_")) {
+if (
+  !sessionId ||
+  !String(sessionId).startsWith("cs_") ||
+  !continuationToken
+) { 
 return res.status(400).json({
 ok: false,
 error: "Se requiere una sesión válida de Stripe para crear la cuenta.",
@@ -459,7 +464,8 @@ ref_code,
 lang,
 payment_status,
 signup_used,
-continuation_email_sent_at
+continuation_email_sent_at,
+continuation_token_hash
 FROM stripe_checkout_access 
 WHERE stripe_session_id = $1
 LIMIT 1
