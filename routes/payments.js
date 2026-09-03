@@ -505,7 +505,7 @@ lang === "en"
 ? "A confirmed payment already exists for this email."
 : "Ya existe un pago confirmado para este correo.",
 redirectUrl:
-`${signupUrl}?session_id=${encodeURIComponent(existingSessionId)}`,
+  `${SITE_URL}/payment-confirmed.html?lang=${lang}`, 
 });
 }
 const session = await stripe.checkout.sessions.create({
