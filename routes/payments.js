@@ -640,6 +640,111 @@ console.error("[payments/webhook] Handler error:", err);
 return res.status(500).send("Webhook handler failed.");
 }
 });
+router.post("/resend-continuation", async (req, res) => {
+  try {
+    await paymentsReady;
+
+    if (!pool) {
+      return res.status(503).json({
+        ok: false,
+        error: "Database is not configured.",
+      });
+    }
+
+    if (!resend) {
+      return res.status(503).json({
+        ok: false,
+        error: "Email service is not configured.",
+      });
+    }
+
+    const sessionId = clean(req.body?.sessionId, 255);
+
+    if (!sessionId || !sessionId.startsWith("cs_")) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid Checkout Session.",
+      });
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        stripe_session_id,
+        lang,
+        payment_status,
+        signup_used,
+        continuation_email_sent_at
+      FROM stripe_checkout_access
+      WHERE stripe_session_id = $1
+      LIMIT 1;
+      `,
+      [sessionId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        ok: false,
+        error: "Checkout Session was not found.",
+      });
+    }
+
+    const row = rows[0];
+    const lang = normalizeLang(row.lang);
+
+    if (row.payment_status !== "paid") {
+      return res.status(402).json({
+        ok: false,
+        error:
+          lang === "en"
+            ? "Payment has not been confirmed."
+            : "El pago todavía no ha sido confirmado.",
+      });
+    }
+
+    if (row.signup_used) {
+      return res.status(409).json({
+        ok: false,
+        error:
+          lang === "en"
+            ? "This payment has already been used to create an account."
+            : "Este pago ya fue utilizado para crear una cuenta.",
+      });
+    }
+
+    if (row.continuation_email_sent_at) {
+      const expiresAt =
+        new Date(row.continuation_email_sent_at).getTime() +
+        48 * 60 * 60 * 1000;
+
+      if (Date.now() <= expiresAt) {
+        return res.status(429).json({
+          ok: false,
+          code: "VERIFICATION_LINK_STILL_ACTIVE",
+          error:
+            lang === "en"
+              ? "Your current verification link is still active."
+              : "Tu enlace de verificación actual todavía está activo.",
+        });
+      }
+    }
+
+    await sendPaymentContinuationEmailIfNeeded(sessionId, true);
+
+    return res.json({
+      ok: true,
+      sent: true,
+      expiresInHours: 48,
+    });
+  } catch (err) {
+    console.error("[payments/resend-continuation]", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Could not resend verification email.",
+    });
+  }
+});
 router.get("/verify-session", async (req, res) => {
 try {
 await paymentsReady;
