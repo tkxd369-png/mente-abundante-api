@@ -661,7 +661,8 @@ lang,
 amount_total,
 currency,
 payment_status,
-signup_used
+signup_used,
+continuation_email_sent_at 
 FROM stripe_checkout_access
 WHERE stripe_session_id = $1
 LIMIT 1
@@ -686,7 +687,30 @@ return res.status(409).json({
 authorized: false,
 error: "This payment has already been used to create an account.",
 });
+} 
+if (!row.continuation_email_sent_at) {
+  return res.status(403).json({
+    authorized: false,
+    code: "EMAIL_VERIFICATION_REQUIRED",
+    error: "Email verification is required to continue.",
+  });
 }
+ 
+const verificationExpiresAt =
+  new Date(row.continuation_email_sent_at).getTime() +
+  48 * 60 * 60 * 1000;
+
+if (Date.now() > verificationExpiresAt) {
+  return res.status(410).json({
+    authorized: false,
+    code: "VERIFICATION_LINK_EXPIRED",
+    error:
+      row.lang === "en"
+        ? "This verification link has expired. Your payment remains confirmed."
+        : "Este enlace de verificación ha expirado. Tu pago permanece confirmado.",
+  });
+} 
+
 // Defense in depth:
 // If an account already exists for the email tied to this paid Checkout
 // Session, treat the payment as consumed even if signup_used was not
