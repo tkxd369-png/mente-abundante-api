@@ -559,7 +559,7 @@ paymentStatus: "pending",
 return res.json({
 ok: true,
 checkoutUrl: session.url,
-sessionId: session.id,
+ 
 });
 } catch (err) {
 console.error("[payments/create-checkout]", err);
