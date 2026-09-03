@@ -2249,6 +2249,76 @@ return res.status(500).json({ ok: false, error: "Server error" });
 }
 });
 // -------------------------
+// ADMIN: referral stats reales
+// -------------------------
+app.get("/admin/referral-stats", adminAuthMiddleware, async (req, res) => {
+  try {
+    const statsResult = await pool.query(`
+      SELECT
+        COUNT(*)::int AS total_referrals,
+
+        COUNT(*) FILTER (
+          WHERE referral_status = 'pending'
+        )::int AS pending_referrals,
+
+        COUNT(*) FILTER (
+          WHERE referral_status = 'qualified'
+        )::int AS qualified_referrals
+
+      FROM stripe_checkout_access
+
+      WHERE payment_status = 'paid'
+        AND signup_used = TRUE
+        AND user_id IS NOT NULL
+        AND ref_code IS NOT NULL
+        AND TRIM(ref_code) <> '';
+    `);
+
+    const topResult = await pool.query(`
+      SELECT
+        u.id,
+        u.full_name,
+        u.email,
+        u.refid,
+        COUNT(*)::int AS qualified_referrals
+
+      FROM stripe_checkout_access s
+
+      JOIN users u
+        ON UPPER(u.refid) = UPPER(s.ref_code)
+
+      WHERE s.payment_status = 'paid'
+        AND s.signup_used = TRUE
+        AND s.user_id IS NOT NULL
+        AND s.referral_status = 'qualified'
+        AND s.ref_code IS NOT NULL
+        AND TRIM(s.ref_code) <> ''
+
+      GROUP BY
+        u.id,
+        u.full_name,
+        u.email,
+        u.refid
+
+      ORDER BY qualified_referrals DESC
+      LIMIT 10;
+    `);
+
+    return res.json({
+      ok: true,
+      stats: statsResult.rows[0],
+      topReferrers: topResult.rows,
+    });
+  } catch (err) {
+    console.error("GET /admin/referral-stats error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+    });
+  }
+});
+// -------------------------
 // ADMIN: lista de usuarios con búsqueda y paginación
 // -------------------------
 app.get("/admin/users", adminAuthMiddleware, async (req, res) => {
