@@ -2351,7 +2351,15 @@ email,
 phone,
 refid,
 referredby,
-COALESCE(referrals, 0)::int AS referrals,
+ (
+  SELECT COUNT(*)::int
+  FROM stripe_checkout_access s
+  WHERE UPPER(s.ref_code) = UPPER(users.refid)
+    AND s.payment_status = 'paid'
+    AND s.signup_used = TRUE
+    AND s.user_id IS NOT NULL
+    AND s.referral_status = 'qualified'
+) AS referrals,
 is_admin,
 created_at,
 lang,
