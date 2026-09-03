@@ -186,7 +186,7 @@ stripe_session_id,
 email,
 full_name,
 lang,
-payment_status,
+ payment_status,
 signup_used,
 continuation_email_sent_at
 FROM stripe_checkout_access
