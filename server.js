@@ -2335,8 +2335,6 @@ app.get("/admin/referral-stats", adminAuthMiddleware, async (req, res) => {
       FROM stripe_checkout_access
 
       WHERE payment_status = 'paid'
-        AND signup_used = TRUE
-        AND user_id IS NOT NULL
         AND ref_code IS NOT NULL
         AND TRIM(ref_code) <> '';
     `);
@@ -2386,6 +2384,46 @@ app.get("/admin/referral-stats", adminAuthMiddleware, async (req, res) => {
   }
 });
 // -------------------------
+// ADMIN: pagos pendientes de activación
+// -------------------------
+app.get("/admin/pending-activations", adminAuthMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        id,
+        full_name,
+        email,
+        phone,
+        country,
+        ref_code,
+        lang,
+        amount_total,
+        currency,
+        paid_at,
+        continuation_email_sent_at,
+        referral_status,
+        referral_review_after,
+        created_at
+      FROM stripe_checkout_access
+      WHERE payment_status = 'paid'
+        AND signup_used = FALSE
+      ORDER BY COALESCE(paid_at, created_at) DESC;
+    `);
+
+    return res.json({
+      ok: true,
+      pendingActivations: rows,
+    });
+  } catch (err) {
+    console.error("GET /admin/pending-activations error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+    });
+  }
+});
+// -------------------------
 // ADMIN: lista de usuarios con búsqueda y paginación
 // -------------------------
 app.get("/admin/users", adminAuthMiddleware, async (req, res) => {
@@ -2418,6 +2456,49 @@ email,
 phone,
 refid,
 referredby,
+ COALESCE(
+  (
+    SELECT p.current_unit
+    FROM user_content_progress p
+    WHERE p.user_id = users.id
+      AND p.content_key = 'ebook_abundance'
+    LIMIT 1
+  ),
+  0
+)::int AS ebook_current_unit,
+
+COALESCE(
+  (
+    SELECT p.status
+    FROM user_content_progress p
+    WHERE p.user_id = users.id
+      AND p.content_key = 'ebook_abundance'
+    LIMIT 1
+  ),
+  'not_started'
+) AS ebook_status,
+
+ COALESCE(
+  (
+    SELECT p.current_unit
+    FROM user_content_progress p
+    WHERE p.user_id = users.id
+      AND p.content_key = 'truth_path'
+    LIMIT 1
+  ),
+  0
+)::int AS ttp_current_unit,
+
+COALESCE(
+  (
+    SELECT p.status
+    FROM user_content_progress p
+    WHERE p.user_id = users.id
+      AND p.content_key = 'truth_path'
+    LIMIT 1
+  ),
+  'locked'
+) AS ttp_status,
  (
   SELECT COUNT(*)::int
   FROM stripe_checkout_access s
