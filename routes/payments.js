@@ -544,7 +544,7 @@ lang,
 source: "tmkp_membership",
 },
 },
-success_url: `${signupUrl}?session_id={CHECKOUT_SESSION_ID}`,
+success_url: `${SITE_URL}/payment-confirmed.html?lang=${lang}`, 
 cancel_url: cancelUrl,
 });
 await upsertCheckoutRecord(session, {
