@@ -458,8 +458,9 @@ country,
 ref_code,
 lang,
 payment_status,
-signup_used
-FROM stripe_checkout_access
+signup_used,
+continuation_email_sent_at
+FROM stripe_checkout_access 
 WHERE stripe_session_id = $1
 LIMIT 1
 FOR UPDATE;
@@ -491,6 +492,37 @@ ok: false,
 error: "Este pago ya fue utilizado para crear una cuenta.",
 });
 }
+if (!checkout.continuation_email_sent_at) {
+  await client.query("ROLLBACK");
+  transactionStarted = false;
+
+  return res.status(403).json({
+    ok: false,
+    code: "EMAIL_VERIFICATION_REQUIRED",
+    error:
+      checkout.lang === "en"
+        ? "Email verification is required to create your account."
+        : "La verificación del correo es requerida para crear tu cuenta.",
+  });
+}
+
+const verificationExpiresAt =
+  new Date(checkout.continuation_email_sent_at).getTime() +
+  48 * 60 * 60 * 1000;
+
+if (Date.now() > verificationExpiresAt) {
+  await client.query("ROLLBACK");
+  transactionStarted = false;
+
+  return res.status(410).json({
+    ok: false,
+    code: "VERIFICATION_LINK_EXPIRED",
+    error:
+      checkout.lang === "en"
+        ? "This verification link has expired. Your payment remains confirmed."
+        : "Este enlace de verificación ha expirado. Tu pago permanece confirmado.",
+  });
+} 
 // Los datos de identidad/referral vienen del checkout confirmado,
 // no del navegador.
 const normalizedEmail = String(checkout.email || "").trim().toLowerCase();
