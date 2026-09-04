@@ -7,6 +7,7 @@ const router = express.Router();
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
 const TMKP_STRIPE_PRICE_ID = process.env.TMKP_STRIPE_PRICE_ID || "";
+const STRIPE_LIVE_TEST_COUPON_ID = process.env.STRIPE_LIVE_TEST_COUPON_ID || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 if (!STRIPE_SECRET_KEY) console.warn("[payments] STRIPE_SECRET_KEY is not configured.");
@@ -537,17 +538,16 @@ locale: lang === "en" ? "en" : "es-419",
 customer_email: email,
 line_items: [
 {
-price_data: {
-currency: "usd",
-unit_amount: CHECKOUT_AMOUNT_CENTS,
-product_data: {
-name: PRODUCT_NAME,
-description: PRODUCT_DESCRIPTION,
-},
-},
+price: TMKP_STRIPE_PRICE_ID,
 quantity: 1,
 },
-],
+], 
+// TEMPORARY: Live $7 test coupon
+discounts: [
+{
+coupon: STRIPE_LIVE_TEST_COUPON_ID,
+},
+], 
 metadata: {
 fullName,
 email,
