@@ -89,6 +89,10 @@ await pool.query(`
 ALTER TABLE IF EXISTS stripe_checkout_access
 ADD COLUMN IF NOT EXISTS user_id BIGINT;
 `);
+await pool.query(`
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS stripe_connect_account_id TEXT;
+`); 
 // Reserve all current account emails.
 await pool.query(`
 INSERT INTO account_email_history (user_id, email)
