@@ -5,10 +5,17 @@ const { Pool } = require("pg");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const Stripe = require("stripe");
 const app = express();
 const Resend = require("resend").Resend;
 const resend = new Resend(process.env.RESEND_API_KEY);
 const paymentsRouter = require("./routes/payments");
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY)
+  : null;
+const SITE_URL = (
+  process.env.TMKP_SITE_URL || "https://themasterkeyprogram.com"
+).replace(/\/+$/, "");
 // -------------------------
 // Configuración de servidor
 // -------------------------
@@ -377,6 +384,106 @@ console.error("adminAuthMiddleware error:", err);
 return res.status(401).json({ ok: false, error: "Invalid or expired token" });
 }
 }
+// -------------------------
+// STRIPE CONNECT: iniciar onboarding
+// -------------------------
+app.post("/connect/onboarding", authMiddleware, async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(503).json({
+        ok: false,
+        error: "Stripe is not configured.",
+      });
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        id,
+        email,
+        country,
+        stripe_connect_account_id
+      FROM users
+      WHERE id = $1
+      LIMIT 1;
+      `,
+      [req.userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: "Usuario no encontrado",
+      });
+    }
+
+    const user = rows[0];
+    const country = String(user.country || "").trim().toUpperCase();
+
+    if (!/^[A-Z]{2}$/.test(country)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid country.",
+      });
+    }
+
+let accountId = String(user.stripe_connect_account_id || "").trim();
+
+if (!accountId) {
+  const account = await stripe.accounts.create(
+    {
+      country,
+      email: user.email,
+      controller: {
+        fees: { payer: "application" },
+        losses: { payments: "application" },
+        stripe_dashboard: { type: "express" },
+      },
+      capabilities: {
+        transfers: { requested: true },
+      },
+      metadata: {
+        tmkp_user_id: String(user.id),
+      },
+    },
+    {
+      idempotencyKey: `tmkp-connect-user-${user.id}`,
+    }
+  );
+
+  accountId = account.id;
+
+  await pool.query(
+    `
+    UPDATE users
+    SET stripe_connect_account_id = $1
+    WHERE id = $2;
+    `,
+    [accountId, user.id]
+  );
+}
+
+const accountLink = await stripe.accountLinks.create({
+  account: accountId,
+  refresh_url: `${SITE_URL}/dashboard.html?connect=refresh`,
+  return_url: `${SITE_URL}/dashboard.html?connect=complete`,
+  type: "account_onboarding",
+});
+
+return res.json({
+  ok: true,
+  onboardingUrl: accountLink.url,
+}); 
+
+  } catch (err) {
+    console.error("POST /connect/onboarding error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Could not start Stripe Connect onboarding.",
+    });
+  }
+});
 // -------------------------
 // Endpoints básicos
 // -------------------------
