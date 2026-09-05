@@ -603,7 +603,13 @@ app.post("/connect/test-transfer", authMiddleware, async (req, res) => {
         error: "Live test reward is not configured.",
       });
     }
-
+if (req.body?.confirm !== "SEND_LIVE_TEST_REWARD") {
+  return res.status(400).json({
+    ok: false,
+    code: "CONFIRMATION_REQUIRED",
+    error: "Explicit confirmation is required for the live test transfer.",
+  });
+}
  const { rows } = await pool.query(
   `
   SELECT
