@@ -770,6 +770,7 @@ app.post("/auth/create-account", async (req, res) => {
 const client = await pool.connect();
 let transactionStarted = false;
 try {
+ await accountSecurityReady;
  const {
   sessionId,
   continuationToken,
@@ -921,6 +922,29 @@ usernameFromEmail(normalizedEmail);
 if (!username) {
 username = `user${Date.now()}`;
 }
+const emailHistoryConflict = await client.query(
+  `
+  SELECT user_id
+  FROM account_email_history
+  WHERE LOWER(email) = LOWER($1)
+  LIMIT 1;
+  `,
+  [normalizedEmail]
+);
+
+if (emailHistoryConflict.rows.length > 0) {
+  await client.query("ROLLBACK");
+  transactionStarted = false;
+
+  return res.status(409).json({
+    ok: false,
+    code: "EMAIL_ALREADY_USED",
+    error:
+      userLang === "en"
+        ? "This email is already associated with an existing membership."
+        : "Este email ya está asociado con una membresía existente.",
+  });
+} 
 // Verificar si ya existe email o username.
 const existing = await client.query(
 "SELECT id, email, username FROM users WHERE email = $1 OR username = $2 LIMIT 1",
