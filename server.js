@@ -442,12 +442,15 @@ if (!accountId) {
       capabilities: {
         transfers: { requested: true },
       },
+     tos_acceptance: {
+  service_agreement: "recipient",
+},
       metadata: {
         tmkp_user_id: String(user.id),
       },
     },
     {
-    idempotencyKey: `tmkp-connect-user-${user.id}-v2`, 
+    idempotencyKey: `tmkp-connect-user-${user.id}-v3`, 
     }
   );
 
