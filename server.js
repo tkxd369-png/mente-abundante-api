@@ -426,6 +426,13 @@ app.post("/connect/onboarding", authMiddleware, async (req, res) => {
         error: "Missing or invalid country.",
       });
     }
+   if (country !== "US") {
+  return res.status(400).json({
+    ok: false,
+    code: "CONNECT_COUNTRY_NOT_YET_SUPPORTED",
+    error: "Stripe Connect payouts are not yet enabled for this country.",
+  });
+}
 
 let accountId = String(user.stripe_connect_account_id || "").trim();
 
@@ -442,15 +449,19 @@ if (!accountId) {
       capabilities: {
         transfers: { requested: true },
       },
-     tos_acceptance: {
-  service_agreement: "recipient",
-},
+ ...(country === "US"
+  ? {}
+  : {
+      tos_acceptance: {
+        service_agreement: "recipient",
+      },
+    }), 
       metadata: {
         tmkp_user_id: String(user.id),
       },
     },
     {
-    idempotencyKey: `tmkp-connect-user-${user.id}-v3`, 
+    idempotencyKey: `tmkp-connect-user-${user.id}-v4`, 
     }
   );
 
