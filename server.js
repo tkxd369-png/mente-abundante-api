@@ -607,15 +607,18 @@ app.post("/connect/test-transfer", authMiddleware, async (req, res) => {
  const { rows } = await pool.query(
   `
   SELECT
-    id,
-    amount_cents,
-    currency,
-    status
-  FROM referral_rewards
-  WHERE sponsor_user_id = $1
-    AND amount_cents = $2
-    AND status = 'pending'
-  ORDER BY qualified_at ASC NULLS LAST, id ASC
+    r.id,
+    r.amount_cents,
+    r.currency,
+    r.status,
+    u.stripe_connect_account_id
+  FROM referral_rewards r
+  JOIN users u
+    ON u.id = r.sponsor_user_id
+  WHERE r.sponsor_user_id = $1
+    AND r.amount_cents = $2
+    AND r.status = 'pending'
+  ORDER BY r.qualified_at ASC NULLS LAST, r.id ASC
   LIMIT 1;
   `,
   [req.userId, testRewardCents]
@@ -628,7 +631,33 @@ if (rows.length === 0) {
     error: "No pending test reward found.",
   });
 }
+const reward = rows[0];
 
+const accountId = String(
+  reward.stripe_connect_account_id || ""
+).trim();
+
+if (!accountId) {
+  return res.status(400).json({
+    ok: false,
+    code: "CONNECT_NOT_CONFIGURED",
+    error: "Stripe Connect is not configured.",
+  });
+}
+
+const account = await stripe.accounts.retrieve(accountId);
+
+ if (
+  account.details_submitted !== true ||
+  account.payouts_enabled !== true ||
+  account.capabilities?.transfers !== "active"
+) {
+  return res.status(409).json({
+    ok: false,
+    code: "CONNECT_NOT_READY",
+    error: "Stripe Connect account is not ready to receive rewards.",
+  });
+}
 return res.json({
   ok: true,
   readyToTransfer: true,
