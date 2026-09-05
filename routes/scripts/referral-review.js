@@ -259,9 +259,9 @@ const lang = row.sponsor_lang === "en" ? "en" : "es";
 const dashboardUrl = `${SITE_URL}/dashboard.html`;
 const name = escapeHtml(firstName(row.sponsor_name));
 const subject =
-lang === "en"
-"Your first referral has been approved! \u2705" 
-"¡Tu primer referido ha sido aprobado! \u2705" 
+  lang === "en"
+    ? "Your first referral has been approved! ✅"
+    : "¡Tu primer referido ha sido aprobado! ✅"; 
 const html =
 lang === "en"
 ? `
