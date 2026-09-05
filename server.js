@@ -664,12 +664,43 @@ const account = await stripe.accounts.retrieve(accountId);
     error: "Stripe Connect account is not ready to receive rewards.",
   });
 }
+ const transfer = await stripe.transfers.create(
+  {
+    amount: reward.amount_cents,
+    currency: reward.currency,
+    destination: accountId,
+    metadata: {
+      tmkp_reward_id: String(reward.id),
+      tmkp_user_id: String(req.userId),
+      purpose: "live_test_referral_reward",
+    },
+  },
+  {
+    idempotencyKey: `tmkp-live-test-reward-${reward.id}`,
+  }
+);
+
+await pool.query(
+  `
+  UPDATE referral_rewards
+  SET status = 'transferred',
+      stripe_transfer_id = $2,
+      transferred_at = NOW(),
+      updated_at = NOW()
+  WHERE id = $1
+    AND sponsor_user_id = $3
+    AND status = 'pending';
+  `,
+  [reward.id, transfer.id, req.userId]
+);
+
 return res.json({
   ok: true,
-  readyToTransfer: true,
-  rewardId: rows[0].id,
-  amountCents: rows[0].amount_cents,
-  currency: rows[0].currency,
+  transferred: true,
+  rewardId: reward.id,
+  amountCents: reward.amount_cents,
+  currency: reward.currency,
+  transferId: transfer.id,
 });
   } catch (err) {
     console.error("POST /connect/test-transfer error:", err);
