@@ -2722,6 +2722,163 @@ app.get("/admin/referral-stats", adminAuthMiddleware, async (req, res) => {
   }
 });
 // -------------------------
+// ADMIN: transferencia de recompensa Live de prueba
+// -------------------------
+app.post(
+  "/admin/test-referral-transfer",
+  adminAuthMiddleware,
+  async (req, res) => {
+    try {
+      const testRewardCents = Number(
+        process.env.TMKP_LIVE_TEST_REWARD_CENTS || 0
+      );
+
+      if (
+        !Number.isInteger(testRewardCents) ||
+        testRewardCents <= 0
+      ) {
+        return res.status(503).json({
+          ok: false,
+          error: "Live test reward is not configured.",
+        });
+      }
+if (req.body?.confirm !== "SEND_LIVE_TEST_REWARD") {
+  return res.status(400).json({
+    ok: false,
+    code: "CONFIRMATION_REQUIRED",
+    error: "Explicit confirmation is required.",
+  });
+}
+     const referralCheckoutId = Number(
+  req.body?.referralCheckoutId
+);
+
+if (
+  !Number.isInteger(referralCheckoutId) ||
+  referralCheckoutId <= 0
+) {
+  return res.status(400).json({
+    ok: false,
+    code: "INVALID_REFERRAL",
+    error: "A valid referral checkout ID is required.",
+  });
+}
+     const { rows } = await pool.query(
+  `
+  SELECT
+    r.id AS reward_id,
+    r.referral_checkout_id,
+    r.sponsor_user_id,
+    r.amount_cents,
+    r.currency,
+    r.status AS reward_status,
+    c.referral_status,
+    u.stripe_connect_account_id
+  FROM referral_rewards r
+  JOIN stripe_checkout_access c
+    ON c.id = r.referral_checkout_id
+  JOIN users u
+    ON u.id = r.sponsor_user_id
+  WHERE r.referral_checkout_id = $1
+    AND r.amount_cents = $2
+    AND r.status = 'pending'
+AND c.referral_status = 'qualified'
+  LIMIT 1;
+  `,
+  [referralCheckoutId, testRewardCents]
+);
+
+if (rows.length === 0) {
+  return res.status(404).json({
+    ok: false,
+    code: "TEST_REWARD_NOT_READY",
+    error: "The test reward is not ready yet.",
+  });
+}
+     const reward = rows[0];
+
+const accountId = String(
+  reward.stripe_connect_account_id || ""
+).trim();
+
+if (!accountId) {
+  return res.status(409).json({
+    ok: false,
+    code: "CONNECT_NOT_CONFIGURED",
+    error: "Sponsor has not configured Stripe Connect.",
+  });
+}
+     if (!stripe) {
+  return res.status(503).json({
+    ok: false,
+    error: "Stripe is not configured.",
+  });
+}
+
+const account = await stripe.accounts.retrieve(accountId);
+
+if (
+  account.details_submitted !== true ||
+  account.payouts_enabled !== true ||
+  account.capabilities?.transfers !== "active"
+) {
+  return res.status(409).json({
+    ok: false,
+    code: "CONNECT_NOT_READY",
+    error: "Sponsor Stripe Connect account is not ready.",
+  });
+}
+    const transfer = await stripe.transfers.create(
+  {
+    amount: reward.amount_cents,
+    currency: reward.currency,
+    destination: accountId,
+    metadata: {
+      tmkp_reward_id: String(reward.reward_id),
+      referral_checkout_id: String(reward.referral_checkout_id),
+      purpose: "admin_live_test_referral_reward",
+    },
+  },
+  {
+    idempotencyKey: `tmkp-admin-live-test-reward-${reward.reward_id}`,
+  }
+);
+
+await pool.query(
+  `
+  UPDATE referral_rewards
+  SET status = 'transferred',
+      stripe_transfer_id = $2,
+      transferred_at = NOW(),
+      updated_at = NOW()
+  WHERE id = $1
+    AND status = 'pending';
+  `,
+  [reward.reward_id, transfer.id]
+);
+
+return res.json({
+  ok: true,
+  transferred: true,
+  rewardId: reward.reward_id,
+  referralCheckoutId: reward.referral_checkout_id,
+  amountCents: reward.amount_cents,
+  currency: reward.currency,
+  transferId: transfer.id,
+});
+    } catch (err) {
+  console.error(
+    "POST /admin/test-referral-transfer error:",
+    err
+  ); 
+      return res.status(500).json({
+        ok: false,
+        error: "Could not process admin test transfer.",
+      });
+    }
+  }
+);
+// -------------------------
 // ADMIN: pagos pendientes de activación
 // -------------------------
 app.get("/admin/pending-activations", adminAuthMiddleware, async (req, res) => {
