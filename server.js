@@ -447,7 +447,7 @@ if (!accountId) {
       },
     },
     {
-      idempotencyKey: `tmkp-connect-user-${user.id}`,
+    idempotencyKey: `tmkp-connect-user-${user.id}-v2`, 
     }
   );
 
