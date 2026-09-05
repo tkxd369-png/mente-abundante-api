@@ -5,6 +5,14 @@ const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 const SITE_URL = (process.env.TMKP_SITE_URL || "https://themasterkeyprogram.com").replace(/\/+$/, "");
+const LIVE_TEST_REWARD_CENTS = Number(
+  process.env.TMKP_LIVE_TEST_REWARD_CENTS || 0
+);
+
+const REFERRAL_REWARD_CENTS =
+  Number.isInteger(LIVE_TEST_REWARD_CENTS) && LIVE_TEST_REWARD_CENTS > 0
+    ? LIVE_TEST_REWARD_CENTS
+    : 17820;
 if (!STRIPE_SECRET_KEY) {
 throw new Error("STRIPE_SECRET_KEY is not configured.");
 }
@@ -137,24 +145,72 @@ console.log(
 );
 continue;
 }
-const result = await pool.query(
-`
-UPDATE stripe_checkout_access
-SET referral_status = 'qualified',
-referral_approved_at = COALESCE(referral_approved_at, NOW()),
-stripe_payment_intent = COALESCE(stripe_payment_intent, $2),
-updated_at = NOW()
-WHERE id = $1
-AND referral_status = 'pending'
-RETURNING id, stripe_session_id, ref_code;
-`,
-[row.id, stripeCheck.paymentIntentId]
-);
-if (result.rowCount === 1) {
-console.log(
-`[referral-review] QUALIFIED: ${row.stripe_session_id} -> ${row.ref_code}`
-);
+ 
+const client = await pool.connect();
+
+try {
+  await client.query("BEGIN");
+
+  const result = await client.query(
+    `
+    UPDATE stripe_checkout_access
+    SET referral_status = 'qualified',
+        referral_approved_at = COALESCE(referral_approved_at, NOW()),
+        stripe_payment_intent = COALESCE(stripe_payment_intent, $2),
+        updated_at = NOW()
+    WHERE id = $1
+      AND referral_status = 'pending'
+    RETURNING id, stripe_session_id, ref_code;
+    `,
+    [row.id, stripeCheck.paymentIntentId]
+  );
+
+  if (result.rowCount === 1) {
+    const rewardInsert = await client.query(
+      `
+      INSERT INTO referral_rewards (
+        referral_checkout_id,
+        sponsor_user_id,
+        amount_cents,
+        currency,
+        status,
+        qualified_at
+      )
+      SELECT
+        $1,
+        s.id,
+        $2,
+        'usd',
+        'pending',
+        NOW()
+      FROM users s
+      WHERE UPPER(s.refid) = UPPER($3)
+      RETURNING id;
+      `,
+      [row.id, REFERRAL_REWARD_CENTS, row.ref_code]
+    );
+
+    if (rewardInsert.rowCount !== 1) {
+      throw new Error(
+        `Reward ledger entry could not be created for ${row.stripe_session_id}`
+      );
+    }
+
+    await client.query("COMMIT");
+
+    console.log(
+      `[referral-review] QUALIFIED: ${row.stripe_session_id} -> ${row.ref_code}`
+    );
+  } else {
+    await client.query("ROLLBACK");
+  }
+} catch (dbErr) {
+  await client.query("ROLLBACK").catch(() => {});
+  throw dbErr;
+} finally {
+  client.release();
 }
+  
 } catch (err) {
 console.error(
 `[referral-review] Could not review ${row.stripe_session_id}:`,
