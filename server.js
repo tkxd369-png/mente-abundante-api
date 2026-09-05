@@ -579,6 +579,73 @@ app.get("/connect/status", authMiddleware, async (req, res) => {
   }
 });
 // -------------------------
+// STRIPE CONNECT: transferencia de prueba
+// -------------------------
+app.post("/connect/test-transfer", authMiddleware, async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(503).json({
+        ok: false,
+        error: "Stripe is not configured.",
+      });
+    }
+
+    const testRewardCents = Number(
+      process.env.TMKP_LIVE_TEST_REWARD_CENTS || 0
+    );
+
+    if (
+      !Number.isInteger(testRewardCents) ||
+      testRewardCents <= 0
+    ) {
+      return res.status(503).json({
+        ok: false,
+        error: "Live test reward is not configured.",
+      });
+    }
+
+ const { rows } = await pool.query(
+  `
+  SELECT
+    id,
+    amount_cents,
+    currency,
+    status
+  FROM referral_rewards
+  WHERE sponsor_user_id = $1
+    AND amount_cents = $2
+    AND status = 'pending'
+  ORDER BY qualified_at ASC NULLS LAST, id ASC
+  LIMIT 1;
+  `,
+  [req.userId, testRewardCents]
+);
+
+if (rows.length === 0) {
+  return res.status(404).json({
+    ok: false,
+    code: "NO_PENDING_TEST_REWARD",
+    error: "No pending test reward found.",
+  });
+}
+
+return res.json({
+  ok: true,
+  readyToTransfer: true,
+  rewardId: rows[0].id,
+  amountCents: rows[0].amount_cents,
+  currency: rows[0].currency,
+});
+  } catch (err) {
+    console.error("POST /connect/test-transfer error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Could not process test transfer.",
+    });
+  }
+});
+// -------------------------
 // Endpoints básicos
 // -------------------------
 app.get("/health", (req, res) => {
