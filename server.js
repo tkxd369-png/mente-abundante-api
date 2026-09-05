@@ -485,6 +485,67 @@ return res.json({
   }
 });
 // -------------------------
+// STRIPE CONNECT: estado del miembro
+// -------------------------
+app.get("/connect/status", authMiddleware, async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(503).json({
+        ok: false,
+        error: "Stripe is not configured.",
+      });
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT stripe_connect_account_id
+      FROM users
+      WHERE id = $1
+      LIMIT 1;
+      `,
+      [req.userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: "Usuario no encontrado",
+      });
+    }
+
+    const accountId = String(
+      rows[0].stripe_connect_account_id || ""
+    ).trim();
+
+    if (!accountId) {
+      return res.json({
+        ok: true,
+        started: false,
+        ready: false,
+      });
+    }
+
+    const account = await stripe.accounts.retrieve(accountId);
+
+    return res.json({
+      ok: true,
+      started: true,
+      ready:
+        account.details_submitted === true &&
+        account.payouts_enabled === true,
+      detailsSubmitted: account.details_submitted === true,
+      payoutsEnabled: account.payouts_enabled === true,
+    });
+  } catch (err) {
+    console.error("GET /connect/status error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Could not retrieve Stripe Connect status.",
+    });
+  }
+});
+// -------------------------
 // Endpoints básicos
 // -------------------------
 app.get("/health", (req, res) => {
