@@ -2797,6 +2797,7 @@ if (
     r.currency,
     r.status AS reward_status,
     c.referral_status,
+    c.stripe_payment_intent,
     u.stripe_connect_account_id
   FROM referral_rewards r
   JOIN stripe_checkout_access c
@@ -2838,7 +2839,33 @@ if (!accountId) {
     error: "Stripe is not configured.",
   });
 }
+const paymentIntentId = String(
+  reward.stripe_payment_intent || ""
+).trim();
 
+if (!paymentIntentId) {
+  return res.status(409).json({
+    ok: false,
+    code: "SOURCE_PAYMENT_MISSING",
+    error: "Original Stripe payment is missing.",
+  });
+}
+     const paymentIntent = await stripe.paymentIntents.retrieve(
+  paymentIntentId
+);
+
+const sourceChargeId =
+  typeof paymentIntent.latest_charge === "string"
+    ? paymentIntent.latest_charge
+    : paymentIntent.latest_charge?.id || "";
+
+if (!sourceChargeId) {
+  return res.status(409).json({
+    ok: false,
+    code: "SOURCE_CHARGE_MISSING",
+    error: "Original Stripe charge is missing.",
+  });
+}
 const account = await stripe.accounts.retrieve(accountId);
 
 if (
@@ -2857,6 +2884,7 @@ if (
     amount: reward.amount_cents,
     currency: reward.currency,
     destination: accountId,
+   source_transaction: sourceChargeId,
     metadata: {
       tmkp_reward_id: String(reward.reward_id),
       referral_checkout_id: String(reward.referral_checkout_id),
@@ -2864,7 +2892,7 @@ if (
     },
   },
   {
-    idempotencyKey: `tmkp-admin-live-test-reward-${reward.reward_id}`,
+ idempotencyKey: `tmkp-admin-live-test-reward-source-v1-${reward.reward_id}`, 
   }
 );
 
