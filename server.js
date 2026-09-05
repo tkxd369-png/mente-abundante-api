@@ -100,6 +100,25 @@ await pool.query(`
 ALTER TABLE users
 ADD COLUMN IF NOT EXISTS stripe_connect_account_id TEXT;
 `); 
+ await pool.query(`
+CREATE TABLE IF NOT EXISTS referral_rewards (
+  id BIGSERIAL PRIMARY KEY,
+  referral_checkout_id BIGINT NOT NULL UNIQUE,
+  sponsor_user_id BIGINT NOT NULL,
+  amount_cents INTEGER NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'usd',
+  status TEXT NOT NULL DEFAULT 'pending',
+  stripe_transfer_id TEXT UNIQUE,
+  qualified_at TIMESTAMPTZ,
+  transferred_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`);
+ await pool.query(`
+CREATE INDEX IF NOT EXISTS idx_referral_rewards_sponsor_status
+ON referral_rewards (sponsor_user_id, status);
+`);
 // Reserve all current account emails.
 await pool.query(`
 INSERT INTO account_email_history (user_id, email)
