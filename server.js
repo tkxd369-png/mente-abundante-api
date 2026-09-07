@@ -672,6 +672,138 @@ transfersActive: account.capabilities?.transfers === "active",
   }
 });
 // -------------------------
+// STRIPE GLOBAL PAYOUTS: onboarding Mexico
+// -------------------------
+app.post("/global-payouts/onboarding", authMiddleware, async (req, res) => {
+  try {
+    if (!stripeGlobalPayouts) {
+      return res.status(503).json({
+        ok: false,
+        error: "Stripe Global Payouts is not configured.",
+      });
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        id,
+        full_name,
+        email,
+        country,
+        global_payouts_recipient_id
+      FROM users
+      WHERE id = $1
+      LIMIT 1;
+      `,
+      [req.userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: "Usuario no encontrado",
+      });
+    }
+
+    const user = rows[0];
+    const country = String(user.country || "").trim().toUpperCase();
+
+    if (country !== "MX") {
+      return res.status(400).json({
+        ok: false,
+        code: "GLOBAL_PAYOUTS_MX_ONLY",
+        error: "Global Payouts onboarding is currently enabled only for Mexico.",
+      });
+    }
+
+    let recipientId = String(
+      user.global_payouts_recipient_id || ""
+    ).trim();
+
+    if (!recipientId) {
+      const recipient = await stripeGlobalPayoutsRequest(
+        "/v2/core/accounts",
+        {
+          method: "POST",
+          idempotencyKey: `tmkp-global-recipient-user-${user.id}`,
+          body: {
+            contact_email: user.email,
+            display_name: user.full_name,
+            identity: {
+              country: "mx",
+              entity_type: "individual",
+            },
+            configuration: {
+              recipient: {
+                capabilities: {
+                  bank_accounts: {
+                    local: {
+                      requested: true,
+                    },
+                  },
+                },
+              },
+            },
+            include: [
+              "identity",
+              "configuration.recipient",
+              "requirements",
+            ],
+          },
+        }
+      );
+
+      recipientId = recipient.id;
+
+      await pool.query(
+        `
+        UPDATE users
+        SET
+          global_payouts_recipient_id = $1,
+          global_payouts_status = 'ONBOARDING'
+        WHERE id = $2;
+        `,
+        [recipientId, user.id]
+      );
+    }
+
+    const accountLink = await stripeGlobalPayoutsRequest(
+      "/v2/core/account_links",
+      {
+        method: "POST",
+        body: {
+          account: recipientId,
+          use_case: {
+            type: "account_onboarding",
+            account_onboarding: {
+              configurations: ["recipient"],
+              return_url:
+                `${SITE_URL}/dashboard.html?global_payouts=complete`,
+              refresh_url:
+                `${SITE_URL}/dashboard.html?global_payouts=refresh`,
+            },
+          },
+        },
+      }
+    );
+
+    return res.json({
+      ok: true,
+      onboardingUrl: accountLink.url,
+    });
+  } catch (err) {
+    console.error(
+      "POST /global-payouts/onboarding error:",
+      err.message
+    );
+
+    return res.status(500).json({
+      ok: false,
+      error: "Could not start Stripe Global Payouts onboarding.",
+    });
+  }
+});
+// -------------------------
 // STRIPE CONNECT: transferencia de prueba
 // -------------------------
 app.post("/connect/test-transfer", authMiddleware, async (req, res) => {
