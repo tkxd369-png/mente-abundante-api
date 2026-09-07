@@ -404,7 +404,7 @@ status,
 ]
 );
 if (refCode && status === "paid") {
-const referralReviewAfter = addBusinessDays(new Date(), 5);
+const referralReviewAfter = addBusinessDays(new Date(), 1); 
 
 await pool.query(
 `
