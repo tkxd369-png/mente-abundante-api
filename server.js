@@ -480,7 +480,7 @@ app.post("/connect/onboarding", authMiddleware, async (req, res) => {
         error: "Missing or invalid country.",
       });
     }
-   if (country !== "US") {
+   if (!["US", "CA", "MX"].includes(country)) { 
   return res.status(400).json({
     ok: false,
     code: "CONNECT_COUNTRY_NOT_YET_SUPPORTED",
@@ -594,15 +594,33 @@ app.get("/connect/status", authMiddleware, async (req, res) => {
     }
 
     const account = await stripe.accounts.retrieve(accountId);
+const stripeCountry = String(account.country || "")
+  .trim()
+  .toUpperCase();
 
+if (stripeCountry) {
+  await pool.query(
+    `
+    UPDATE users
+    SET country = $1
+    WHERE id = $2
+      AND country IS DISTINCT FROM $1;
+    `,
+    [stripeCountry, req.userId]
+  );
+}
     return res.json({
       ok: true,
       started: true,
+     country: stripeCountry || null,
+countryLocked: !!stripeCountry,
       ready:
-        account.details_submitted === true &&
-        account.payouts_enabled === true,
-      detailsSubmitted: account.details_submitted === true,
-      payoutsEnabled: account.payouts_enabled === true,
+  account.details_submitted === true &&
+  account.payouts_enabled === true &&
+  account.capabilities?.transfers === "active",
+detailsSubmitted: account.details_submitted === true,
+payoutsEnabled: account.payouts_enabled === true,
+transfersActive: account.capabilities?.transfers === "active",
     });
   } catch (err) {
     console.error("GET /connect/status error:", err);
@@ -2100,7 +2118,25 @@ country !== undefined
 : null;
 const normalizedLang =
 lang !== undefined ? (String(lang).toLowerCase() === "en" ? "en" : "es") : null;
-if (fullName !== undefined && !normalizedFullName) {
+const currentCountry = String(currentUser.country || "")
+  .trim()
+  .toUpperCase();
+
+if (
+  country !== undefined &&
+  currentUser.stripe_connect_account_id &&
+  normalizedCountry !== currentCountry
+) {
+  return res.status(409).json({
+    ok: false,
+    code: "CONNECT_COUNTRY_LOCKED",
+    error:
+      currentUser.lang === "en"
+        ? "Your payout country is locked to your Stripe Express account."
+        : "Tu país de pagos está vinculado a tu cuenta de Stripe Express y ya no puede cambiarse desde TMKP.",
+  });
+}
+ if (fullName !== undefined && !normalizedFullName) {
 return res.status(400).json({
 ok: false,
 error:
