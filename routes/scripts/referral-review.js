@@ -181,7 +181,7 @@ try {
         s.id,
         $2,
         'usd',
-        'pending',
+       'qualified_waiting_funds', 
         NOW()
       FROM users s
       WHERE UPPER(s.refid) = UPPER($3)
