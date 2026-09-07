@@ -2865,9 +2865,10 @@ m.account_status_reason AS member_account_status_reason,
           r.qualified_at,
           r.transferred_at,
 
-          s.id AS sponsor_user_id,
-          s.full_name AS sponsor_name,
-          s.email AS sponsor_email
+         s.id AS sponsor_user_id,
+s.full_name AS sponsor_name,
+s.email AS sponsor_email,
+s.stripe_connect_account_id AS sponsor_stripe_connect_account_id
 
         FROM stripe_checkout_access c
 
@@ -2967,9 +2968,54 @@ const referralsWithFunds = await Promise.all(
     }
   })
 );
+     const referralsWithConnectStatus = await Promise.all(
+  referralsWithFunds.map(async (row) => {
+    const accountId = String(
+      row.sponsor_stripe_connect_account_id || ""
+    ).trim();
+
+    if (!accountId) {
+      return {
+        ...row,
+        sponsor_stripe_status: "—",
+      };
+    }
+
+    try {
+      if (!stripe) {
+        return {
+          ...row,
+          sponsor_stripe_status: "ERROR",
+        };
+      }
+
+      const account = await stripe.accounts.retrieve(accountId);
+
+      const ready =
+        account.details_submitted === true &&
+        account.payouts_enabled === true &&
+        account.capabilities?.transfers === "active";
+
+      return {
+        ...row,
+        sponsor_stripe_status: ready ? "READY" : "ONBOARDING",
+      };
+    } catch (err) {
+      console.error(
+        `[admin] Could not read Stripe Express status for sponsor ${row.sponsor_user_id}:`,
+        err.message
+      );
+
+      return {
+        ...row,
+        sponsor_stripe_status: "ERROR",
+      };
+    }
+  })
+);
       return res.json({
         ok: true,
-        referrals: referralsWithFunds,
+     referrals: referralsWithConnectStatus,
       });
     } catch (err) {
       console.error(
