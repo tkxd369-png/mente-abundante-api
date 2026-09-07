@@ -16,6 +16,38 @@ const stripe = process.env.STRIPE_SECRET_KEY
 const stripeGlobalPayouts = process.env.STRIPE_GLOBAL_PAYOUTS_KEY
   ? new Stripe(process.env.STRIPE_GLOBAL_PAYOUTS_KEY)
   : null;
+const STRIPE_GLOBAL_PAYOUTS_API_VERSION = "2026-08-26.preview"; 
+
+async function stripeGlobalPayoutsRequest(path, { method = "GET", body, idempotencyKey } = {}) {
+  const headers = {
+    Authorization: `Bearer ${process.env.STRIPE_GLOBAL_PAYOUTS_KEY}`,
+    "Stripe-Version": STRIPE_GLOBAL_PAYOUTS_API_VERSION,
+    "Content-Type": "application/json",
+  };
+
+  if (idempotencyKey) {
+    headers["Idempotency-Key"] = idempotencyKey;
+  }
+
+  const response = await fetch(`https://api.stripe.com${path}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    const err = new Error(
+      data?.error?.message || "Stripe Global Payouts request failed."
+    );
+    err.statusCode = response.status;
+    err.stripeResponse = data;
+    throw err;
+  }
+
+  return data;
+}
 const SITE_URL = (
   process.env.TMKP_SITE_URL || "https://themasterkeyprogram.com"
 ).replace(/\/+$/, "");
@@ -103,10 +135,11 @@ await pool.query(`
 ALTER TABLE users
 ADD COLUMN IF NOT EXISTS stripe_connect_account_id TEXT;
 `); 
- await pool.query(`
+await pool.query(`
 ALTER TABLE users
-ADD COLUMN IF NOT EXISTS stripe_global_recipient_id TEXT;
-`);
+ADD COLUMN IF NOT EXISTS global_payouts_recipient_id TEXT,
+ADD COLUMN IF NOT EXISTS global_payouts_status VARCHAR(20);
+`); 
  await pool.query(`
 ALTER TABLE users
 ADD COLUMN IF NOT EXISTS account_status TEXT NOT NULL DEFAULT 'active',
