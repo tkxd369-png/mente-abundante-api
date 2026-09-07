@@ -3433,13 +3433,58 @@ pool.query(listQuery, listParams),
 ]);
 const total = countResult.rows[0].total;
 const users = listResult.rows;
+ const usersWithConnectStatus = await Promise.all(
+  users.map(async (user) => {
+    const accountId = String(
+      user.stripe_connect_account_id || ""
+    ).trim();
+
+    if (!accountId) {
+      return {
+        ...user,
+        stripe_express_status: "—",
+      };
+    }
+
+    try {
+      if (!stripe) {
+        return {
+          ...user,
+          stripe_express_status: "ERROR",
+        };
+      }
+
+      const account = await stripe.accounts.retrieve(accountId);
+
+      const ready =
+        account.details_submitted === true &&
+        account.payouts_enabled === true &&
+        account.capabilities?.transfers === "active";
+
+      return {
+        ...user,
+        stripe_express_status: ready ? "READY" : "ONBOARDING",
+      };
+    } catch (err) {
+      console.error(
+        `[admin] Could not read Stripe Express status for member ${user.id}:`,
+        err.message
+      );
+
+      return {
+        ...user,
+        stripe_express_status: "ERROR",
+      };
+    }
+  })
+);
 return res.json({
 ok: true,
 page,
 pageSize,
 total,
 totalPages: Math.ceil(total / pageSize),
-users,
+users: usersWithConnectStatus, 
 });
 } catch (err) {
 console.error("GET /admin/users error:", err);
