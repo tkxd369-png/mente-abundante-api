@@ -2846,6 +2846,7 @@ app.get(
           c.email AS member_email,
           m.account_status AS member_account_status,
 m.account_status_reason AS member_account_status_reason,
+m.stripe_connect_account_id AS member_stripe_connect_account_id,
           c.ref_code AS sponsor_ref,
 
           c.payment_status,
@@ -2971,13 +2972,13 @@ const referralsWithFunds = await Promise.all(
      const referralsWithConnectStatus = await Promise.all(
   referralsWithFunds.map(async (row) => {
     const accountId = String(
-      row.sponsor_stripe_connect_account_id || ""
+  row.member_stripe_connect_account_id || ""
     ).trim();
 
     if (!accountId) {
       return {
         ...row,
-        sponsor_stripe_status: "—",
+        member_stripe_status:  "—",
       };
     }
 
@@ -2985,7 +2986,7 @@ const referralsWithFunds = await Promise.all(
       if (!stripe) {
         return {
           ...row,
-          sponsor_stripe_status: "ERROR",
+         member_stripe_status: "ERROR",
         };
       }
 
@@ -2998,17 +2999,17 @@ const referralsWithFunds = await Promise.all(
 
       return {
         ...row,
-        sponsor_stripe_status: ready ? "READY" : "ONBOARDING",
+        member_stripe_status : ready ? "READY" : "ONBOARDING",
       };
     } catch (err) {
       console.error(
-        `[admin] Could not read Stripe Express status for sponsor ${row.sponsor_user_id}:`,
+       `[admin] Could not read Stripe Express status for member ${row.user_id}:`,
         err.message
       );
 
       return {
         ...row,
-        sponsor_stripe_status: "ERROR",
+      member_stripe_status: "ERROR", 
       };
     }
   })
