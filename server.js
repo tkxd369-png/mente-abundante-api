@@ -102,6 +102,10 @@ ADD COLUMN IF NOT EXISTS stripe_connect_account_id TEXT;
 `); 
  await pool.query(`
 ALTER TABLE users
+ADD COLUMN IF NOT EXISTS stripe_global_recipient_id TEXT;
+`);
+ await pool.query(`
+ALTER TABLE users
 ADD COLUMN IF NOT EXISTS account_status TEXT NOT NULL DEFAULT 'active',
 ADD COLUMN IF NOT EXISTS account_status_reason TEXT,
 ADD COLUMN IF NOT EXISTS account_status_updated_at TIMESTAMPTZ;
