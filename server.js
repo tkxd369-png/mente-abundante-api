@@ -2845,10 +2845,90 @@ LEFT JOIN users m
         ORDER BY COALESCE(c.paid_at, c.created_at) DESC
         LIMIT 100;
       `);
+const referralsWithFunds = await Promise.all(
+  rows.map(async (row) => {
+    const sessionId = String(row.stripe_session_id || "");
 
+    // Registros antiguos de prueba
+    if (sessionId.startsWith("cs_test_")) {
+      return {
+        ...row,
+        stripe_mode: "TEST",
+        funds_status: "TEST",
+      };
+    }
+
+    // Solo consultar Stripe para transacciones Live
+    if (!sessionId.startsWith("cs_live_")) {
+      return {
+        ...row,
+        stripe_mode: "—",
+        funds_status: "—",
+      };
+    }
+
+    try {
+      if (!stripe || !row.stripe_payment_intent) {
+        return {
+          ...row,
+          stripe_mode: "LIVE",
+          funds_status: "UNKNOWN",
+        };
+      }
+
+      const paymentIntent = await stripe.paymentIntents.retrieve(
+        row.stripe_payment_intent
+      );
+
+      const chargeId =
+        typeof paymentIntent.latest_charge === "string"
+          ? paymentIntent.latest_charge
+          : paymentIntent.latest_charge?.id || "";
+
+      if (!chargeId) {
+        return {
+          ...row,
+          stripe_mode: "LIVE",
+          funds_status: "PENDING",
+        };
+      }
+
+      const charge = await stripe.charges.retrieve(chargeId, {
+        expand: ["balance_transaction"],
+      });
+
+      const balanceTransaction =
+        typeof charge.balance_transaction === "string"
+          ? await stripe.balanceTransactions.retrieve(
+              charge.balance_transaction
+            )
+          : charge.balance_transaction;
+
+      return {
+        ...row,
+        stripe_mode: "LIVE",
+        funds_status:
+          balanceTransaction?.status?.toUpperCase() || "UNKNOWN",
+        funds_available_on:
+          balanceTransaction?.available_on || null,
+      };
+    } catch (err) {
+      console.error(
+        `[admin] Could not read Stripe funds for checkout ${row.checkout_id}:`,
+        err.message
+      );
+
+      return {
+        ...row,
+        stripe_mode: "LIVE",
+        funds_status: "ERROR",
+      };
+    }
+  })
+);
       return res.json({
         ok: true,
-        referrals: rows,
+        referrals: referralsWithFunds,
       });
     } catch (err) {
       console.error(
