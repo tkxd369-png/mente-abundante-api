@@ -13,6 +13,9 @@ const paymentsRouter = require("./routes/payments");
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
   : null;
+const stripeGlobalPayouts = process.env.STRIPE_GLOBAL_PAYOUTS_KEY
+  ? new Stripe(process.env.STRIPE_GLOBAL_PAYOUTS_KEY)
+  : null;
 const SITE_URL = (
   process.env.TMKP_SITE_URL || "https://themasterkeyprogram.com"
 ).replace(/\/+$/, "");
