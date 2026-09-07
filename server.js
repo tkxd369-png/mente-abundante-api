@@ -2924,7 +2924,7 @@ if (
     ON u.id = r.sponsor_user_id
   WHERE r.referral_checkout_id = $1
     AND r.amount_cents = $2
-    AND r.status = 'pending'
+    AND r.status = 'qualified_waiting_funds'
 AND c.referral_status = 'qualified'
   LIMIT 1;
   `,
@@ -2968,6 +2968,7 @@ if (!paymentIntentId) {
     error: "Original Stripe payment is missing.",
   });
 }
+
      const paymentIntent = await stripe.paymentIntents.retrieve(
   paymentIntentId
 );
@@ -2984,6 +2985,30 @@ if (!sourceChargeId) {
     error: "Original Stripe charge is missing.",
   });
 }
+    const sourceCharge = await stripe.charges.retrieve(
+  sourceChargeId,
+  {
+    expand: ["balance_transaction"],
+  }
+);
+
+const balanceTransaction =
+  typeof sourceCharge.balance_transaction === "string"
+    ? await stripe.balanceTransactions.retrieve(
+        sourceCharge.balance_transaction
+      )
+    : sourceCharge.balance_transaction;
+
+if (
+  !balanceTransaction ||
+  balanceTransaction.status !== "available"
+) {
+  return res.status(409).json({
+    ok: false,
+    code: "SOURCE_FUNDS_NOT_AVAILABLE",
+    error: "The funds for this specific payment are not available yet.",
+  });
+}      
 const account = await stripe.accounts.retrieve(accountId);
 
 if (
@@ -3021,8 +3046,8 @@ await pool.query(
       stripe_transfer_id = $2,
       transferred_at = NOW(),
       updated_at = NOW()
-  WHERE id = $1
-    AND status = 'pending';
+WHERE id = $1
+  AND status = 'qualified_waiting_funds'; 
   `,
   [reward.reward_id, transfer.id]
 );
