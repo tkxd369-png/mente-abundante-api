@@ -219,6 +219,154 @@ err
 }
 }
 }
+async function processQualifiedRewards() {
+  const { rows } = await pool.query(`
+    SELECT
+      r.id AS reward_id,
+      r.referral_checkout_id,
+      r.sponsor_user_id,
+      r.amount_cents,
+      r.currency,
+      r.status AS reward_status,
+
+      c.stripe_session_id,
+      c.stripe_payment_intent,
+      c.referral_status,
+      c.user_id AS referred_user_id,
+
+      s.stripe_connect_account_id,
+
+      COALESCE(m.account_status, 'active') AS member_account_status
+
+    FROM referral_rewards r
+
+    JOIN stripe_checkout_access c
+      ON c.id = r.referral_checkout_id
+
+    JOIN users s
+      ON s.id = r.sponsor_user_id
+
+    LEFT JOIN users m
+      ON m.id = c.user_id
+
+    WHERE r.status = 'qualified_waiting_funds'
+      AND c.referral_status = 'qualified'
+
+    ORDER BY r.qualified_at ASC
+    LIMIT 100;
+  `);
+
+  console.log(
+    `[referral-review] Rewards waiting for funds: ${rows.length}`
+  );
+for (const row of rows) {
+  try {
+    if (row.member_account_status !== "active") {
+      console.log(
+        `[referral-review] Reward ${row.reward_id} on hold: member account ${row.member_account_status}`
+      );
+      continue;
+    }
+
+    if (!row.stripe_connect_account_id) {
+      console.log(
+        `[referral-review] Reward ${row.reward_id} waiting for Stripe Connect.`
+      );
+      continue;
+    }
+
+    const stripeCheck = await verifyStripePayment(row);
+
+    if (!stripeCheck.eligible) {
+      console.log(
+        `[referral-review] Reward ${row.reward_id} on hold: ${stripeCheck.reason}`
+      );
+      continue;
+    }
+
+    const charge = await stripe.charges.retrieve(
+      stripeCheck.chargeId,
+      {
+        expand: ["balance_transaction"],
+      }
+    );
+
+    const balanceTransaction =
+      typeof charge.balance_transaction === "string"
+        ? await stripe.balanceTransactions.retrieve(
+            charge.balance_transaction
+          )
+        : charge.balance_transaction;
+
+    if (
+      !balanceTransaction ||
+      balanceTransaction.status !== "available"
+    ) {
+      console.log(
+        `[referral-review] Reward ${row.reward_id} waiting for source funds.`
+      );
+      continue;
+    }
+
+    console.log(
+      `[referral-review] Reward ${row.reward_id} source funds AVAILABLE.`
+    );
+   const account = await stripe.accounts.retrieve(
+  row.stripe_connect_account_id
+);
+
+if (
+  account.details_submitted !== true ||
+  account.payouts_enabled !== true ||
+  account.capabilities?.transfers !== "active"
+) {
+  console.log(
+    `[referral-review] Reward ${row.reward_id} waiting for Stripe Connect readiness.`
+  );
+  continue;
+} 
+  const transfer = await stripe.transfers.create(
+  {
+    amount: row.amount_cents,
+    currency: row.currency,
+    destination: row.stripe_connect_account_id,
+    source_transaction: stripeCheck.chargeId,
+    metadata: {
+      tmkp_reward_id: String(row.reward_id),
+      referral_checkout_id: String(row.referral_checkout_id),
+      purpose: "referral_reward",
+    },
+  },
+  {
+    idempotencyKey: `tmkp-referral-reward-${row.reward_id}`,
+  }
+);
+  const updateResult = await pool.query(
+  `
+  UPDATE referral_rewards
+  SET status = 'transferred',
+      stripe_transfer_id = $2,
+      transferred_at = NOW(),
+      updated_at = NOW()
+  WHERE id = $1
+    AND status = 'qualified_waiting_funds';
+  `,
+  [row.reward_id, transfer.id]
+);
+
+if (updateResult.rowCount === 1) {
+  console.log(
+    `[referral-review] Reward ${row.reward_id} TRANSFERRED: ${transfer.id}`
+  );
+}  
+  } catch (err) {
+    console.error(
+      `[referral-review] Could not process reward ${row.reward_id}:`,
+      err
+    );
+  }
+}
+}
 async function sendFirstQualifiedReferralEmails() {
 if (!resend) {
 console.warn(
@@ -350,6 +498,7 @@ err
 async function main() {
 console.log("[referral-review] Starting referral review.");
 await qualifyDueReferrals();
+ await processQualifiedRewards(); 
 await sendFirstQualifiedReferralEmails();
 console.log("[referral-review] Finished.");
 }
