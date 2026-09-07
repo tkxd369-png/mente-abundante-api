@@ -3417,7 +3417,8 @@ COALESCE(
 is_admin,
 created_at,
 lang,
-country
+country,
+stripe_connect_account_id 
 FROM users
 ${whereClause}
 ORDER BY created_at DESC
