@@ -617,6 +617,11 @@ app.get("/connect/status", authMiddleware, async (req, res) => {
 // STRIPE CONNECT: transferencia de prueba
 // -------------------------
 app.post("/connect/test-transfer", authMiddleware, async (req, res) => {
+ return res.status(410).json({
+  ok: false,
+  code: "ADMIN_TRANSFER_ONLY",
+  error: "Referral rewards are processed automatically by TMKP.",
+});
   try {
     if (!stripe) {
       return res.status(503).json({
