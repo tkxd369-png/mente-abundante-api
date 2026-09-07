@@ -2790,6 +2790,80 @@ app.get("/admin/referral-stats", adminAuthMiddleware, async (req, res) => {
   }
 });
 // -------------------------
+// ADMIN: estado financiero de referidos
+// -------------------------
+app.get(
+  "/admin/referral-financial-status",
+  adminAuthMiddleware,
+  async (req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT
+          c.id AS checkout_id,
+          c.user_id,
+          c.full_name AS member_name,
+          c.email AS member_email,
+          m.account_status AS member_account_status,
+m.account_status_reason AS member_account_status_reason,
+          c.ref_code AS sponsor_ref,
+
+          c.payment_status,
+          c.stripe_session_id,
+          c.stripe_payment_intent,
+          c.paid_at,
+
+          c.referral_status,
+          c.referral_review_after,
+          c.referral_approved_at,
+
+          r.id AS reward_id,
+          r.amount_cents,
+          r.currency,
+          r.status AS reward_status,
+          r.stripe_transfer_id,
+          r.qualified_at,
+          r.transferred_at,
+
+          s.id AS sponsor_user_id,
+          s.full_name AS sponsor_name,
+          s.email AS sponsor_email
+
+        FROM stripe_checkout_access c
+
+LEFT JOIN users m
+  ON m.id = c.user_id
+        LEFT JOIN referral_rewards r
+          ON r.referral_checkout_id = c.id
+
+        LEFT JOIN users s
+          ON UPPER(s.refid) = UPPER(c.ref_code)
+
+        WHERE c.payment_status = 'paid'
+          AND c.ref_code IS NOT NULL
+          AND TRIM(c.ref_code) <> ''
+
+        ORDER BY COALESCE(c.paid_at, c.created_at) DESC
+        LIMIT 100;
+      `);
+
+      return res.json({
+        ok: true,
+        referrals: rows,
+      });
+    } catch (err) {
+      console.error(
+        "GET /admin/referral-financial-status error:",
+        err
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error: "Server error",
+      });
+    }
+  }
+);
+// -------------------------
 // ADMIN: transferencia de recompensa Live de prueba
 // -------------------------
 app.post(
