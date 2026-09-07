@@ -101,6 +101,12 @@ ALTER TABLE users
 ADD COLUMN IF NOT EXISTS stripe_connect_account_id TEXT;
 `); 
  await pool.query(`
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS account_status TEXT NOT NULL DEFAULT 'active',
+ADD COLUMN IF NOT EXISTS account_status_reason TEXT,
+ADD COLUMN IF NOT EXISTS account_status_updated_at TIMESTAMPTZ;
+`);
+ await pool.query(`
 CREATE TABLE IF NOT EXISTS referral_rewards (
   id BIGSERIAL PRIMARY KEY,
   referral_checkout_id BIGINT NOT NULL UNIQUE,
@@ -361,7 +367,7 @@ return `${short}${last3}`;
 /**
 * Autenticación normal de usuario (token JWT).
 */
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) { 
 const authHeader = req.headers.authorization || "";
 const token = authHeader.startsWith("Bearer ")
 ? authHeader.slice(7)
@@ -373,6 +379,35 @@ try {
 const decoded = jwt.verify(token, process.env.JWT_SECRET);
 req.userId = decoded.userId;
 req.jwtPayload = decoded;
+const accountResult = await pool.query(
+  `
+  SELECT account_status
+  FROM users
+  WHERE id = $1
+  LIMIT 1;
+  `,
+  [decoded.userId]
+);
+
+if (accountResult.rows.length === 0) {
+  return res.status(401).json({
+    ok: false,
+    code: "ACCOUNT_NOT_FOUND",
+    error: "Account not found.",
+  });
+}
+
+const accountStatus =
+  accountResult.rows[0].account_status || "active";
+
+if (accountStatus !== "active") {
+  return res.status(403).json({
+    ok: false,
+    code: "ACCOUNT_RESTRICTED",
+    accountStatus,
+    error: "This account is currently restricted.",
+  });
+} 
 next();
 } catch (err) {
 console.error("authMiddleware error:", err);
@@ -1187,9 +1222,18 @@ if (rows.length === 0) {
 return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
 }
 const user = rows[0];
-const passwordMatch = await bcrypt.compare(password, user.password_hash);
+ const passwordMatch = await bcrypt.compare(password, user.password_hash);
 if (!passwordMatch) {
 return res.status(401).json({ ok: false, error: "Credenciales inválidas" });
+}
+ 
+ if ((user.account_status || "active") !== "active") {
+  return res.status(403).json({
+    ok: false,
+    code: "ACCOUNT_RESTRICTED",
+    accountStatus: user.account_status,
+    error: "This account is currently restricted.",
+  });
 }
 const token = createToken(user);
 const userResp = buildUserResponse(user);
