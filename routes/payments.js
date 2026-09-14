@@ -217,10 +217,10 @@ if (row.continuation_email_sent_at && !forceResend) return;
 const lang = normalizeLang(row.lang);
  const continuationToken = crypto.randomBytes(32).toString("hex");
 const continuationTokenHash = hashContinuationToken(continuationToken);
-const continuationPage =
+ const continuationPage =
   lang === "en"
     ? "puente-video-en.html"
-    : "signup.html";
+    : "puente-video.html";
 
 const signupUrl =
   `${SITE_URL}/${continuationPage}?session_id=${encodeURIComponent(sessionId)}` +
