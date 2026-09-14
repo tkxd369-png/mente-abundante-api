@@ -234,7 +234,8 @@ async function processQualifiedRewards() {
       c.referral_status,
       c.user_id AS referred_user_id,
 
-      s.stripe_connect_account_id,
+     s.stripe_connect_account_id,
+s.country AS sponsor_country, 
 
       COALESCE(m.account_status, 'active') AS member_account_status
 
@@ -267,7 +268,16 @@ for (const row of rows) {
       );
       continue;
     }
+const sponsorCountry = String(row.sponsor_country || "")
+  .trim()
+  .toUpperCase();
 
+if (sponsorCountry !== "US") {
+  console.log(
+    `[referral-review] Reward ${row.reward_id} waiting for non-US payout method (${sponsorCountry || "UNKNOWN"}).`
+  );
+  continue;
+}
     if (!row.stripe_connect_account_id) {
       console.log(
         `[referral-review] Reward ${row.reward_id} waiting for Stripe Connect.`
