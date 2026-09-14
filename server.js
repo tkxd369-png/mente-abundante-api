@@ -520,7 +520,7 @@ app.post("/connect/onboarding", authMiddleware, async (req, res) => {
         error: "Missing or invalid country.",
       });
     }
-   if (!["US", "CA", "MX"].includes(country)) { 
+   if (!["US"].includes(country)) { 
   return res.status(400).json({
     ok: false,
     code: "CONNECT_COUNTRY_NOT_YET_SUPPORTED",
