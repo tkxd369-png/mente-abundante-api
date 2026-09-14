@@ -474,6 +474,16 @@ error:
 "Missing required checkout information: fullName, email, phone, country, or refCode.",
 });
 }
+ if (country !== "US") {
+  return res.status(400).json({
+    ok: false,
+    code: "COUNTRY_NOT_YET_AVAILABLE",
+    error:
+      lang === "en"
+        ? "TMKP is currently available only in the United States. Mexico and parts of Latin America are coming soon."
+        : "TMKP está disponible actualmente solo en Estados Unidos. Próximamente en México y partes de Latinoamérica.",
+  });
+}
 const signupUrl = getSignupUrl(lang);
 const cancelUrl = getMembershipUrl(lang, refCode);
 // PREVENT DUPLICATE CHARGES:
