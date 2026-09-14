@@ -2294,18 +2294,17 @@ const currentCountry = String(currentUser.country || "")
   .trim()
   .toUpperCase();
 
-if (
+ if (
   country !== undefined &&
-  currentUser.stripe_connect_account_id &&
   normalizedCountry !== currentCountry
 ) {
   return res.status(409).json({
     ok: false,
-    code: "CONNECT_COUNTRY_LOCKED",
+    code: "COUNTRY_CHANGE_DISABLED",
     error:
       currentUser.lang === "en"
-        ? "Your payout country is locked to your Stripe Express account."
-        : "Tu país de pagos está vinculado a tu cuenta de Stripe Express y ya no puede cambiarse desde TMKP.",
+        ? "Country changes are currently disabled. TMKP is available only for new accounts in the United States."
+        : "Los cambios de país están deshabilitados actualmente. TMKP está disponible solo para cuentas nuevas en Estados Unidos.",
   });
 }
  if (fullName !== undefined && !normalizedFullName) {
