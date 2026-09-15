@@ -3735,23 +3735,25 @@ const { config, totalPayments } = await getCurrentPhase();
 const { rows } = await pool.query(`
   SELECT COUNT(*)::int AS last_hour
   FROM stripe_checkout_access
-  WHERE created_at >= NOW() - INTERVAL '60 minutes'
+  WHERE payment_status = 'paid'
+    AND paid_at >= NOW() - INTERVAL '60 minutes'
     AND amount_total >= 49500;
-`);
+`); 
 const lastHour = rows[0]?.last_hour || 0;
 const isOpen = lastHour < config.limitPerHour;
 // Para countdown simple: si está cerrado, estimamos “retry” a 60 min desde el pago más viejo dentro de la hora
 let retrySeconds = 0;
 if (!isOpen) {
  const oldest = await pool.query(`
-  SELECT created_at
+  SELECT paid_at
   FROM stripe_checkout_access
-  WHERE created_at >= NOW() - INTERVAL '60 minutes'
+  WHERE payment_status = 'paid'
+    AND paid_at >= NOW() - INTERVAL '60 minutes'
     AND amount_total >= 49500
-  ORDER BY created_at ASC
+  ORDER BY paid_at ASC
   LIMIT 1;
 `);
-const oldestTs = oldest.rows[0]?.created_at;
+const oldestTs = oldest.rows[0]?.paid_at; 
 if (oldestTs) {
 // segundos hasta que ese pago salga de la ventana de 60 min
 const diff = await pool.query(`SELECT EXTRACT(EPOCH FROM (($1::timestamptz + INTERVAL '60 minutes') - NOW()))::int AS s;`, [oldestTs]);
