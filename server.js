@@ -3705,34 +3705,51 @@ const TMK_PHASES = [
 ]; 
 // Calcula la fase actual por total de pagos
 async function getCurrentPhase() {
-const { rows } = await pool.query(`SELECT COUNT(*)::int AS total FROM payments;`);
-const total = rows[0]?.total || 0;
-let current = TMK_PHASES[TMK_PHASES.length - 1];
-for (const p of TMK_PHASES) {
-if (p.maxPayments && total < p.maxPayments) { current = p; break; }
-}
-return { totalPayments: total, config: current };
+  const { rows } = await pool.query(`
+    SELECT COUNT(*)::int AS total
+    FROM stripe_checkout_access
+    WHERE payment_status = 'paid'
+      AND amount_total >= 49500;
+  `);
+
+  const total = rows[0]?.total || 0;
+
+  let current = TMK_PHASES[TMK_PHASES.length - 1];
+
+  for (const p of TMK_PHASES) {
+    if (p.maxPayments === null || total < p.maxPayments) {
+      current = p;
+      break;
+    }
+  }
+
+  return {
+    totalPayments: total,
+    config: current
+  };
 }
 app.get("/gate/status", async (req, res) => {
 try {
 const { config, totalPayments } = await getCurrentPhase();
 // pagos en los últimos 60 minutos
 const { rows } = await pool.query(`
-SELECT COUNT(*)::int AS last_hour
-FROM payments
-WHERE created_at >= NOW() - INTERVAL '60 minutes';
+  SELECT COUNT(*)::int AS last_hour
+  FROM stripe_checkout_access
+  WHERE created_at >= NOW() - INTERVAL '60 minutes'
+    AND amount_total >= 49500;
 `);
 const lastHour = rows[0]?.last_hour || 0;
 const isOpen = lastHour < config.limitPerHour;
 // Para countdown simple: si está cerrado, estimamos “retry” a 60 min desde el pago más viejo dentro de la hora
 let retrySeconds = 0;
 if (!isOpen) {
-const oldest = await pool.query(`
-SELECT created_at
-FROM payments
-WHERE created_at >= NOW() - INTERVAL '60 minutes'
-ORDER BY created_at ASC
-LIMIT 1;
+ const oldest = await pool.query(`
+  SELECT created_at
+  FROM stripe_checkout_access
+  WHERE created_at >= NOW() - INTERVAL '60 minutes'
+    AND amount_total >= 49500
+  ORDER BY created_at ASC
+  LIMIT 1;
 `);
 const oldestTs = oldest.rows[0]?.created_at;
 if (oldestTs) {
