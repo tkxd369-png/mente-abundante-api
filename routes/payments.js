@@ -26,6 +26,7 @@ ssl: process.env.NODE_ENV === "production"
 const CHECKOUT_AMOUNT_CENTS = Number(
 process.env.TMKP_CHECKOUT_AMOUNT_CENTS || "49500"
 );
+ 
 const SITE_URL = (
 process.env.TMKP_SITE_URL || "https://themasterkeyprogram.com"
 ).replace(/\/+$/, "");
@@ -161,6 +162,7 @@ remaining -= 1;
 
 return result;
 }
+ 
 function getSignupUrl(lang) {
 return lang === "en"
 ? `${SITE_URL}/signup-en.html`
