@@ -3666,11 +3666,43 @@ return res.status(500).json({ ok: false, error: "Server error" });
 // Inicio del servidor
 // -------------------------
 const TMK_PHASES = [
-{ phase: 1, limitPerHour: 4, price: 497, reward: 177.30, maxPayments: 7 },
-{ phase: 2, limitPerHour: 2, price: 777, reward: 177.30, maxPayments: 2 },
-{ phase: 3, limitPerHour: 2, price: 1270, reward: 250.00, maxPayments: 2 },
-{ phase: 4, limitPerHour: 2, price: 1970, reward: 447.00, maxPayments: null },
-];
+  {
+    phase: 1,
+    limitPerHour: 100,
+    price: 495,
+    rewardGross: 198.00,
+    deductionPercent: 10,
+    reward: 178.20,
+    maxPayments: 1000
+  },
+  {
+    phase: 2,
+    limitPerHour: 100,
+    price: 777,
+    rewardGross: 277.00,
+    deductionPercent: 10,
+    reward: 249.30,
+    maxPayments: 10000
+  },
+  {
+    phase: 3,
+    limitPerHour: 100,
+    price: 1277,
+    rewardGross: 277.00,
+    deductionPercent: 10,
+    reward: 249.30,
+    maxPayments: 100000
+  },
+  {
+    phase: 4,
+    limitPerHour: 100,
+    price: 1777,
+    rewardGross: 570.00,
+    deductionPercent: 10,
+    reward: 513.00,
+    maxPayments: null
+  }
+]; 
 // Calcula la fase actual por total de pagos
 async function getCurrentPhase() {
 const { rows } = await pool.query(`SELECT COUNT(*)::int AS total FROM payments;`);
