@@ -63,7 +63,38 @@ const TMKP_CHECKOUT_PHASES = [
     maxPayments: null
   }
 ];
- 
+async function getCurrentCheckoutPhase() {
+  const { rows } = await pool.query(`
+    SELECT COUNT(*)::int AS total
+    FROM stripe_checkout_access
+    WHERE payment_status = 'paid'
+      AND is_test_account = FALSE
+      AND (
+        amount_total >= 49500
+        OR purchase_type = 'courtesy'
+      );
+  `);
+
+  const total = rows[0]?.total || 0;
+
+  let current =
+    TMKP_CHECKOUT_PHASES[TMKP_CHECKOUT_PHASES.length - 1];
+
+  for (const phase of TMKP_CHECKOUT_PHASES) {
+    if (
+      phase.maxPayments === null ||
+      total < phase.maxPayments
+    ) {
+      current = phase;
+      break;
+    }
+  }
+
+  return {
+    totalPayments: total,
+    phase: current
+  };
+} 
 const SITE_URL = (
 process.env.TMKP_SITE_URL || "https://themasterkeyprogram.com"
 ).replace(/\/+$/, "");
@@ -91,6 +122,10 @@ paid_at TIMESTAMPTZ,
 is_test_account BOOLEAN NOT NULL DEFAULT FALSE,
 purchase_type TEXT NOT NULL DEFAULT 'normal',
 reward_eligible BOOLEAN NOT NULL DEFAULT TRUE,
+  pricing_phase INTEGER,
+  phase_price_cents INTEGER,
+  reward_gross_cents INTEGER,
+  reward_cents INTEGER,
 signup_used BOOLEAN NOT NULL DEFAULT FALSE,
 signup_used_at TIMESTAMPTZ,
 continuation_email_sent_at TIMESTAMPTZ,
@@ -123,6 +158,13 @@ ADD COLUMN IF NOT EXISTS continuation_token_hash TEXT;
  await pool.query(`
 ALTER TABLE stripe_checkout_access
 ADD COLUMN IF NOT EXISTS is_test_account BOOLEAN NOT NULL DEFAULT FALSE;
+`);
+ await pool.query(`
+ALTER TABLE stripe_checkout_access
+ADD COLUMN IF NOT EXISTS pricing_phase INTEGER,
+ADD COLUMN IF NOT EXISTS phase_price_cents INTEGER,
+ADD COLUMN IF NOT EXISTS reward_gross_cents INTEGER,
+ADD COLUMN IF NOT EXISTS reward_cents INTEGER;
 `);
  await pool.query(`
 ALTER TABLE stripe_checkout_access
@@ -429,6 +471,29 @@ const rewardEligible =
     fallback.rewardEligible ??
     (isTestAccount ? "false" : "true")
   ).toLowerCase() === "true";
+ const pricingPhase = Number(
+  metadata.pricingPhase ??
+  fallback.pricingPhase ??
+  0
+);
+
+const phasePriceCents = Number(
+  metadata.phasePriceCents ??
+  fallback.phasePriceCents ??
+  0
+);
+
+const rewardGrossCents = Number(
+  metadata.rewardGrossCents ??
+  fallback.rewardGrossCents ??
+  0
+);
+
+const rewardCents = Number(
+  metadata.rewardCents ??
+  fallback.rewardCents ??
+  0
+);
 const status =
 session.payment_status === "paid"
 ? "paid"
@@ -452,17 +517,21 @@ lang,
 amount_total,
 currency,
 payment_status,
-is_test_account,
+ is_test_account,
 purchase_type,
 reward_eligible,
+pricing_phase,
+phase_price_cents,
+reward_gross_cents,
+reward_cents,
 paid_at,
 updated_at
 )
 VALUES (
-$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
 CASE WHEN $11 = 'paid' THEN NOW() ELSE NULL END,
 NOW()
-)
+) 
 ON CONFLICT (stripe_session_id)
 DO UPDATE SET
 stripe_payment_intent = COALESCE(
@@ -499,6 +568,10 @@ payment_status = EXCLUDED.payment_status,
 is_test_account = EXCLUDED.is_test_account,
 purchase_type = EXCLUDED.purchase_type,
 reward_eligible = EXCLUDED.reward_eligible,
+pricing_phase = EXCLUDED.pricing_phase,
+phase_price_cents = EXCLUDED.phase_price_cents,
+reward_gross_cents = EXCLUDED.reward_gross_cents,
+reward_cents = EXCLUDED.reward_cents,
 paid_at = CASE
 WHEN EXCLUDED.payment_status = 'paid'
 THEN COALESCE(stripe_checkout_access.paid_at, NOW())
@@ -525,6 +598,10 @@ status,
  isTestAccount,
 purchaseType,
 rewardEligible,
+ pricingPhase,
+phasePriceCents,
+rewardGrossCents,
+rewardCents,
 ]
 );
 if (refCode && status === "paid" && rewardEligible) { 
@@ -684,6 +761,8 @@ redirectUrl:
   `${SITE_URL}/payment-confirmed.html?lang=${lang}`, 
 });
 }
+const { phase: currentPhase } =
+  await getCurrentCheckoutPhase(); 
 const session = await stripe.checkout.sessions.create({
 mode: "payment",
 // Force Stripe Checkout to match the TMKP language flow.
@@ -712,6 +791,10 @@ lang,
  isTestAccount: isTestAccount ? "true" : "false",
 purchaseType,
 rewardEligible: rewardEligible ? "true" : "false",
+ pricingPhase: String(currentPhase.phase),
+phasePriceCents: String(currentPhase.priceCents),
+rewardGrossCents: String(currentPhase.rewardGrossCents),
+rewardCents: String(currentPhase.rewardCents),
 source: "tmkp_membership",
 },
 payment_intent_data: {
