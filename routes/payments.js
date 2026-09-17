@@ -12,8 +12,8 @@ const TMKP_INTERNAL_TEST_CODE =
   process.env.TMKP_INTERNAL_TEST_CODE || "";
 const STRIPE_INTERNAL_TEST_COUPON_ID =
   process.env.STRIPE_INTERNAL_TEST_COUPON_ID || "";
-const STRIPE_COURTESY_COUPON_ID =
-  process.env.STRIPE_COURTESY_COUPON_ID || "";
+const COURTESY_CODE_SECRET =
+  process.env.JWT_SECRET || "";
 
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
@@ -244,6 +244,42 @@ function isValidInternalTestCode(value) {
   if (!provided || !expected) {
     return false;
   }
+  const providedBuffer = Buffer.from(provided);
+  const expectedBuffer = Buffer.from(expected);
+
+  if (providedBuffer.length !== expectedBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    providedBuffer,
+    expectedBuffer
+  );
+}
+function getCourtesyCode(refCode) {
+  const normalizedRefCode = clean(refCode, 80).toUpperCase();
+
+  if (!normalizedRefCode || !COURTESY_CODE_SECRET) {
+    return "";
+  }
+
+  const hash = crypto
+    .createHmac("sha256", COURTESY_CODE_SECRET)
+    .update(`tmkp-courtesy:${normalizedRefCode}`)
+    .digest("hex")
+    .slice(0, 10)
+    .toUpperCase();
+
+  return `GIFT-${hash}`;
+}
+function isValidCourtesyCode(value, refCode) {
+  const provided = clean(value, 200).toUpperCase();
+  const expected = getCourtesyCode(refCode);
+
+  if (!provided || !expected) {
+    return false;
+  }
+
   const providedBuffer = Buffer.from(provided);
   const expectedBuffer = Buffer.from(expected);
 
