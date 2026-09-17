@@ -162,6 +162,16 @@ CREATE TABLE IF NOT EXISTS referral_rewards (
 );
 `);
  await pool.query(`
+CREATE TABLE IF NOT EXISTS courtesy_invites (
+  id BIGSERIAL PRIMARY KEY,
+  sponsor_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash TEXT NOT NULL UNIQUE,
+  stripe_session_id TEXT UNIQUE,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`);
+ await pool.query(`
 CREATE INDEX IF NOT EXISTS idx_referral_rewards_sponsor_status
 ON referral_rewards (sponsor_user_id, status);
 `);
@@ -400,6 +410,32 @@ const base = (username || "user").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
 const short = base.slice(0, 8);
 const last3 = (phoneDigits || "").slice(-3) || "000";
 return `${short}${last3}`;
+}
+function getCourtesyCode(refCode) {
+  const normalizedRefCode = String(refCode || "")
+    .trim()
+    .toUpperCase();
+
+  const secret = process.env.JWT_SECRET || "";
+
+  if (!normalizedRefCode || !secret) {
+    return "";
+  }
+
+  const hash = crypto
+    .createHmac("sha256", secret)
+    .update(`tmkp-courtesy:${normalizedRefCode}`)
+    .digest("hex")
+    .slice(0, 10)
+    .toUpperCase();
+
+  return `GIFT-${hash}`;
+}
+function hashCourtesyCode(code) {
+  return crypto
+    .createHash("sha256")
+    .update(String(code || "").trim().toUpperCase())
+    .digest("hex");
 }
 // -------------------------
 // Middlewares de auth
@@ -1467,6 +1503,54 @@ user: userResp,
 console.error("GET /me error:", err);
 return res.status(500).json({ ok: false, error: "Server error" });
 }
+});
+app.post("/referrals/courtesy-code", authMiddleware, async (req, res) => { 
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT refid
+      FROM users
+      WHERE id = $1
+      LIMIT 1;
+      `,
+      [req.userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: "Usuario no encontrado",
+      });
+    }
+
+    const courtesyCode =
+  `GIFT-${crypto.randomBytes(6).toString("hex").toUpperCase()}`;
+
+const codeHash = hashCourtesyCode(courtesyCode);
+
+await pool.query(
+  `
+  INSERT INTO courtesy_invites (
+    sponsor_user_id,
+    code_hash
+  )
+  VALUES ($1, $2);
+  `,
+  [req.userId, codeHash]
+);
+
+return res.json({
+  ok: true,
+  courtesyCode,
+}); 
+  } catch (err) {
+    console.error("GET /referrals/courtesy-code error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+    });
+  }
 });
 // -------------------------
 // REFERRALS: resumen real del miembro
