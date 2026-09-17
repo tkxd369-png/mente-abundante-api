@@ -122,6 +122,7 @@ email,
 ref_code,
 lang,
 paid_at,
+reward_cents,
 referral_review_after
 FROM stripe_checkout_access
 WHERE payment_status = 'paid'
@@ -147,7 +148,16 @@ console.log(
 );
 continue;
 }
- 
+ const phaseRewardCents = Number(row.reward_cents);
+
+const rewardAmountCents =
+  Number.isInteger(LIVE_TEST_REWARD_CENTS) &&
+  LIVE_TEST_REWARD_CENTS > 0
+    ? LIVE_TEST_REWARD_CENTS
+    : Number.isInteger(phaseRewardCents) &&
+      phaseRewardCents > 0
+      ? phaseRewardCents
+      : 17820;
 const client = await pool.connect();
 
 try {
@@ -189,7 +199,7 @@ try {
       WHERE UPPER(s.refid) = UPPER($3)
       RETURNING id;
       `,
-      [row.id, REFERRAL_REWARD_CENTS, row.ref_code]
+     [row.id, rewardAmountCents, row.ref_code] 
     );
 
     if (rewardInsert.rowCount !== 1) {
