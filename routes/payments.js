@@ -494,15 +494,16 @@ const rewardCents = Number(
   fallback.rewardCents ??
   0
 );
-const status =
-session.payment_status === "paid"
-? "paid"
-: clean(
-session.payment_status ||
-fallback.paymentStatus ||
-"pending",
-40
-);
+ const status =
+  session.payment_status === "paid" ||
+  (isTestAccount && session.payment_status === "no_payment_required")
+    ? "paid"
+    : clean(
+        session.payment_status ||
+        fallback.paymentStatus ||
+        "pending",
+        40
+      );
 await pool.query(
 `
  INSERT INTO stripe_checkout_access (
@@ -680,6 +681,16 @@ if (testCode && !isTestAccount) {
         : "Código de prueba inválido."
   });
 }
+if (isTestAccount && !STRIPE_INTERNAL_TEST_COUPON_ID) {
+  return res.status(503).json({
+    ok: false,
+    code: "TEST_MODE_NOT_CONFIGURED",
+    error:
+      lang === "en"
+        ? "Internal test mode is not configured."
+        : "El modo interno de prueba no está configurado."
+  });
+} 
 const { purchaseType, rewardEligible } = getPurchaseFlags({
   isTestAccount,
   isCourtesy: false
@@ -763,24 +774,33 @@ redirectUrl:
 }
 const { phase: currentPhase } =
   await getCurrentCheckoutPhase(); 
+ const checkoutDiscounts = isTestAccount
+  ? [{ coupon: STRIPE_INTERNAL_TEST_COUPON_ID }]
+  : STRIPE_LIVE_TEST_COUPON_ID
+    ? [{ coupon: STRIPE_LIVE_TEST_COUPON_ID }]
+    : [];
 const session = await stripe.checkout.sessions.create({
 mode: "payment",
 // Force Stripe Checkout to match the TMKP language flow.
 // Spanish uses Stripe's Latin American Spanish locale.
 locale: lang === "en" ? "en" : "es-419",
 customer_email: email,
-line_items: [
-{
-price: TMKP_STRIPE_PRICE_ID,
-quantity: 1,
-},
-], 
-// TEMPORARY: Live $7 test coupon
-discounts: [
-{
-coupon: STRIPE_LIVE_TEST_COUPON_ID,
-},
-], 
+ line_items: [
+  {
+    price_data: {
+      currency: "usd",
+      product_data: {
+        name: PRODUCT_NAME,
+        description: PRODUCT_DESCRIPTION,
+      },
+      unit_amount: currentPhase.priceCents,
+    },
+    quantity: 1,
+  },
+],
+...(checkoutDiscounts.length > 0
+  ? { discounts: checkoutDiscounts }
+  : {}), 
 metadata: {
 fullName,
 email,
