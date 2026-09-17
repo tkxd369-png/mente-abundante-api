@@ -128,6 +128,8 @@ WHERE payment_status = 'paid'
 AND signup_used = TRUE
 AND user_id IS NOT NULL
 AND referral_status = 'pending'
+AND reward_eligible = TRUE
+AND is_test_account = FALSE
 AND referral_review_after IS NOT NULL
 AND referral_review_after <= NOW()
 AND ref_code IS NOT NULL
@@ -252,6 +254,8 @@ s.country AS sponsor_country,
 
     WHERE r.status = 'qualified_waiting_funds'
       AND c.referral_status = 'qualified'
+      AND c.reward_eligible = TRUE
+      AND c.is_test_account = FALSE
 
     ORDER BY r.qualified_at ASC
     LIMIT 100;
