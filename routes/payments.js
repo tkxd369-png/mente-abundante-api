@@ -8,6 +8,13 @@ const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
 const TMKP_STRIPE_PRICE_ID = process.env.TMKP_STRIPE_PRICE_ID || "";
 const STRIPE_LIVE_TEST_COUPON_ID = process.env.STRIPE_LIVE_TEST_COUPON_ID || "";
+const TMKP_INTERNAL_TEST_CODE =
+  process.env.TMKP_INTERNAL_TEST_CODE || "";
+const STRIPE_INTERNAL_TEST_COUPON_ID =
+  process.env.STRIPE_INTERNAL_TEST_COUPON_ID || "";
+const STRIPE_COURTESY_COUPON_ID =
+  process.env.STRIPE_COURTESY_COUPON_ID || "";
+
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 if (!STRIPE_SECRET_KEY) console.warn("[payments] STRIPE_SECRET_KEY is not configured.");
@@ -26,6 +33,36 @@ ssl: process.env.NODE_ENV === "production"
 const CHECKOUT_AMOUNT_CENTS = Number(
 process.env.TMKP_CHECKOUT_AMOUNT_CENTS || "49500"
 );
+const TMKP_CHECKOUT_PHASES = [
+  {
+    phase: 1,
+    priceCents: 49500,
+    rewardGrossCents: 19800,
+    rewardCents: 17820,
+    maxPayments: 1000
+  },
+  {
+    phase: 2,
+    priceCents: 77700,
+    rewardGrossCents: 27700,
+    rewardCents: 24930,
+    maxPayments: 10000
+  },
+  {
+    phase: 3,
+    priceCents: 127700,
+    rewardGrossCents: 27700,
+    rewardCents: 24930,
+    maxPayments: 100000
+  },
+  {
+    phase: 4,
+    priceCents: 177700,
+    rewardGrossCents: 57000,
+    rewardCents: 51300,
+    maxPayments: null
+  }
+];
  
 const SITE_URL = (
 process.env.TMKP_SITE_URL || "https://themasterkeyprogram.com"
@@ -51,6 +88,9 @@ amount_total INTEGER,
 currency TEXT DEFAULT 'usd',
 payment_status TEXT NOT NULL DEFAULT 'pending',
 paid_at TIMESTAMPTZ,
+is_test_account BOOLEAN NOT NULL DEFAULT FALSE,
+purchase_type TEXT NOT NULL DEFAULT 'normal',
+reward_eligible BOOLEAN NOT NULL DEFAULT TRUE,
 signup_used BOOLEAN NOT NULL DEFAULT FALSE,
 signup_used_at TIMESTAMPTZ,
 continuation_email_sent_at TIMESTAMPTZ,
@@ -63,6 +103,11 @@ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `);
+ await pool.query(`
+ALTER TABLE stripe_checkout_access
+ADD COLUMN IF NOT EXISTS purchase_type TEXT NOT NULL DEFAULT 'normal',
+ADD COLUMN IF NOT EXISTS reward_eligible BOOLEAN NOT NULL DEFAULT TRUE;
+`);
 await pool.query(`
 ALTER TABLE stripe_checkout_access
 ADD COLUMN IF NOT EXISTS user_id BIGINT;
@@ -74,6 +119,10 @@ ADD COLUMN IF NOT EXISTS continuation_email_sent_at TIMESTAMPTZ;
  await pool.query(`
 ALTER TABLE stripe_checkout_access
 ADD COLUMN IF NOT EXISTS continuation_token_hash TEXT;
+`);
+ await pool.query(`
+ALTER TABLE stripe_checkout_access
+ADD COLUMN IF NOT EXISTS is_test_account BOOLEAN NOT NULL DEFAULT FALSE;
 `);
  await pool.query(`
 ALTER TABLE stripe_checkout_access
@@ -145,6 +194,45 @@ return clean(value, 320).toLowerCase();
 }
 function normalizeLang(value) {
 return clean(value, 5).toLowerCase() === "en" ? "en" : "es";
+}
+function isValidInternalTestCode(value) {
+  const provided = clean(value, 200);
+  const expected = String(TMKP_INTERNAL_TEST_CODE || "").trim();
+
+  if (!provided || !expected) {
+    return false;
+  }
+  const providedBuffer = Buffer.from(provided);
+  const expectedBuffer = Buffer.from(expected);
+
+  if (providedBuffer.length !== expectedBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    providedBuffer,
+    expectedBuffer
+  );
+}
+function getPurchaseFlags({ isTestAccount = false, isCourtesy = false } = {}) {
+  if (isTestAccount) {
+    return {
+      purchaseType: "test",
+      rewardEligible: false
+    };
+  }
+
+  if (isCourtesy) {
+    return {
+      purchaseType: "courtesy",
+      rewardEligible: false
+    };
+  }
+
+  return {
+    purchaseType: "normal",
+    rewardEligible: true
+  };
 }
 function addBusinessDays(startDate, businessDays) {
 const result = new Date(startDate);
@@ -321,6 +409,26 @@ const phone = clean(metadata.phone || fallback.phone, 60);
 const country = clean(metadata.country || fallback.country, 8).toUpperCase();
 const refCode = clean(metadata.refCode || fallback.refCode, 80).toUpperCase();
 const lang = normalizeLang(metadata.lang || fallback.lang);
+ const isTestAccount =
+  String(
+    metadata.isTestAccount ??
+    fallback.isTestAccount ??
+    "false"
+  ).toLowerCase() === "true";
+
+const purchaseType = clean(
+  metadata.purchaseType ??
+  fallback.purchaseType ??
+  (isTestAccount ? "test" : "normal"),
+  20
+).toLowerCase();
+
+const rewardEligible =
+  String(
+    metadata.rewardEligible ??
+    fallback.rewardEligible ??
+    (isTestAccount ? "false" : "true")
+  ).toLowerCase() === "true";
 const status =
 session.payment_status === "paid"
 ? "paid"
@@ -332,7 +440,7 @@ fallback.paymentStatus ||
 );
 await pool.query(
 `
-INSERT INTO stripe_checkout_access (
+ INSERT INTO stripe_checkout_access (
 stripe_session_id,
 stripe_payment_intent,
 email,
@@ -344,11 +452,14 @@ lang,
 amount_total,
 currency,
 payment_status,
+is_test_account,
+purchase_type,
+reward_eligible,
 paid_at,
 updated_at
 )
 VALUES (
-$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
 CASE WHEN $11 = 'paid' THEN NOW() ELSE NULL END,
 NOW()
 )
@@ -385,6 +496,9 @@ EXCLUDED.currency,
 stripe_checkout_access.currency
 ),
 payment_status = EXCLUDED.payment_status,
+is_test_account = EXCLUDED.is_test_account,
+purchase_type = EXCLUDED.purchase_type,
+reward_eligible = EXCLUDED.reward_eligible,
 paid_at = CASE
 WHEN EXCLUDED.payment_status = 'paid'
 THEN COALESCE(stripe_checkout_access.paid_at, NOW())
@@ -408,9 +522,12 @@ Number.isInteger(session.amount_total)
 : CHECKOUT_AMOUNT_CENTS,
 clean(session.currency || "usd", 10).toLowerCase(),
 status,
+ isTestAccount,
+purchaseType,
+rewardEligible,
 ]
 );
-if (refCode && status === "paid") {
+if (refCode && status === "paid" && rewardEligible) { 
 const referralReviewAfter = addBusinessDays(new Date(), 1); 
 
 await pool.query(
@@ -470,6 +587,26 @@ const phone = clean(req.body?.phone, 60);
 const country = clean(req.body?.country, 8).toUpperCase();
 const refCode = clean(req.body?.refCode, 80).toUpperCase();
 const lang = normalizeLang(req.body?.lang);
+
+ const testCode = clean(req.body?.testCode, 200);
+
+const isTestAccount =
+  testCode !== "" && isValidInternalTestCode(testCode);
+
+if (testCode && !isTestAccount) {
+  return res.status(400).json({
+    ok: false,
+    code: "INVALID_TEST_CODE",
+    error:
+      lang === "en"
+        ? "Invalid test code."
+        : "Código de prueba inválido."
+  });
+}
+const { purchaseType, rewardEligible } = getPurchaseFlags({
+  isTestAccount,
+  isCourtesy: false
+}); 
 if (!fullName || !email || !phone || !country || !refCode) {
 return res.status(400).json({
 error:
@@ -572,6 +709,9 @@ phone,
 country,
 refCode,
 lang,
+ isTestAccount: isTestAccount ? "true" : "false",
+purchaseType,
+rewardEligible: rewardEligible ? "true" : "false",
 source: "tmkp_membership",
 },
 payment_intent_data: {
