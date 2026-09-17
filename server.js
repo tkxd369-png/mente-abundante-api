@@ -1038,6 +1038,8 @@ country,
 ref_code,
 lang,
 payment_status,
+is_test_account,
+purchase_type,
 signup_used,
 continuation_email_sent_at,
 continuation_token_hash
@@ -1231,7 +1233,7 @@ const newUser = rows[0];
 // Guardamos el estado actualizado para detectar únicamente el PRIMER referido.
 let sponsorAfterReferral = null;
 
-if (referredby) {
+if (referredby && checkout.is_test_account !== true) { 
 const sponsorResult = await client.query(
 `
 UPDATE users
@@ -1519,6 +1521,7 @@ app.get("/referrals/summary", authMiddleware, async (req, res) => {
         AND payment_status = 'paid'
         AND signup_used = TRUE
         AND user_id IS NOT NULL;
+        AND is_test_account = FALSE
       `,
       [refCode]
     );
@@ -1584,6 +1587,7 @@ app.get("/referrals/activity", authMiddleware, async (req, res) => {
         AND payment_status = 'paid'
         AND signup_used = TRUE
         AND user_id IS NOT NULL
+        AND is_test_account = FALSE
         AND referral_status IN ('pending', 'qualified')
       ORDER BY COALESCE(signup_used_at, created_at) DESC
       LIMIT 100;
