@@ -3707,10 +3707,13 @@ const TMK_PHASES = [
 async function getCurrentPhase() {
   const { rows } = await pool.query(`
     SELECT COUNT(*)::int AS total
-    FROM stripe_checkout_access
-    WHERE payment_status = 'paid'
-      AND amount_total >= 49500;
-  `);
+FROM stripe_checkout_access
+WHERE payment_status = 'paid'
+  AND is_test_account = FALSE
+  AND (
+    amount_total >= 49500
+    OR purchase_type = 'courtesy'
+  );
 
   const total = rows[0]?.total || 0;
 
@@ -3736,23 +3739,31 @@ const { rows } = await pool.query(`
   SELECT COUNT(*)::int AS last_hour
   FROM stripe_checkout_access
   WHERE payment_status = 'paid'
-    AND paid_at >= NOW() - INTERVAL '60 minutes'
-    AND amount_total >= 49500;
+  AND paid_at >= NOW() - INTERVAL '60 minutes'
+  AND is_test_account = FALSE
+  AND (
+    amount_total >= 49500
+    OR purchase_type = 'courtesy'
+  ); 
 `); 
 const lastHour = rows[0]?.last_hour || 0;
 const isOpen = lastHour < config.limitPerHour;
 // Para countdown simple: si está cerrado, estimamos “retry” a 60 min desde el pago más viejo dentro de la hora
 let retrySeconds = 0;
 if (!isOpen) {
- const oldest = await pool.query(`
+const oldest = await pool.query(`
   SELECT paid_at
   FROM stripe_checkout_access
   WHERE payment_status = 'paid'
     AND paid_at >= NOW() - INTERVAL '60 minutes'
-    AND amount_total >= 49500
+    AND is_test_account = FALSE
+    AND (
+      amount_total >= 49500
+      OR purchase_type = 'courtesy'
+    )
   ORDER BY paid_at ASC
   LIMIT 1;
-`);
+`); 
 const oldestTs = oldest.rows[0]?.paid_at; 
 if (oldestTs) {
 // segundos hasta que ese pago salga de la ventana de 60 min
