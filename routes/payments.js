@@ -292,6 +292,54 @@ function isValidCourtesyCode(value, refCode) {
     expectedBuffer
   );
 }
+function hashCourtesyCode(code) {
+  return crypto
+    .createHash("sha256")
+    .update(String(code || "").trim().toUpperCase())
+    .digest("hex");
+}
+async function findAvailableCourtesyInvite(code, refCode) {
+  const provided = String(code || "").trim();
+  const normalizedRefCode = clean(refCode, 80).toUpperCase();
+
+  if (!provided || !normalizedRefCode || !pool) {
+    return null;
+  }
+
+  const codeHash = hashCourtesyCode(provided);
+
+  const { rows } = await pool.query(
+    `
+    SELECT
+      ci.id,
+      ci.sponsor_user_id
+    FROM courtesy_invites ci
+    JOIN users s
+      ON s.id = ci.sponsor_user_id
+    WHERE ci.code_hash = $1
+      AND UPPER(s.refid) = $2
+      AND ci.used_at IS NULL
+      AND ci.stripe_session_id IS NULL
+    LIMIT 1;
+    `,
+    [codeHash, normalizedRefCode]
+  );
+
+  return rows[0] || null;
+}
+async function markCourtesyInviteUsed(sessionId) {
+  if (!pool || !sessionId) return;
+
+  await pool.query(
+    `
+    UPDATE courtesy_invites
+    SET used_at = COALESCE(used_at, NOW())
+    WHERE stripe_session_id = $1
+      AND used_at IS NULL;
+    `,
+    [sessionId]
+  );
+}
 function getPurchaseFlags({ isTestAccount = false, isCourtesy = false } = {}) {
   if (isTestAccount) {
     return {
@@ -706,10 +754,12 @@ const lang = normalizeLang(req.body?.lang);
 
 const isTestAccount =
   testCode !== "" && isValidInternalTestCode(testCode);
-const isCourtesy =
-  testCode !== "" &&
-  !isTestAccount &&
-  isValidCourtesyCode(testCode, refCode);
+ const courtesyInvite =
+  testCode !== "" && !isTestAccount
+    ? await findAvailableCourtesyInvite(testCode, refCode)
+    : null;
+
+const isCourtesy = !!courtesyInvite;
  if (testCode && !isTestAccount && !isCourtesy) {
   return res.status(400).json({
     ok: false,
@@ -873,6 +923,31 @@ source: "tmkp_membership",
 success_url: `${SITE_URL}/payment-confirmed.html?lang=${lang}`, 
 cancel_url: cancelUrl,
 });
+ if (isCourtesy && courtesyInvite) {
+  const reserveResult = await pool.query(
+    `
+    UPDATE courtesy_invites
+    SET stripe_session_id = $2
+    WHERE id = $1
+      AND used_at IS NULL
+      AND stripe_session_id IS NULL;
+    `,
+    [courtesyInvite.id, session.id]
+  );
+
+  if (reserveResult.rowCount !== 1) {
+    await stripe.checkout.sessions.expire(session.id).catch(() => {});
+
+    return res.status(409).json({
+      ok: false,
+      code: "COURTESY_CODE_ALREADY_USED",
+      error:
+        lang === "en"
+          ? "This courtesy invitation is no longer available."
+          : "Esta invitación de cortesía ya no está disponible.",
+    });
+  }
+}
 await upsertCheckoutRecord(session, {
 fullName,
 email,
