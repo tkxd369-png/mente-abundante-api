@@ -706,15 +706,18 @@ const lang = normalizeLang(req.body?.lang);
 
 const isTestAccount =
   testCode !== "" && isValidInternalTestCode(testCode);
-
-if (testCode && !isTestAccount) {
+const isCourtesy =
+  testCode !== "" &&
+  !isTestAccount &&
+  isValidCourtesyCode(testCode, refCode);
+ if (testCode && !isTestAccount && !isCourtesy) {
   return res.status(400).json({
     ok: false,
-    code: "INVALID_TEST_CODE",
+    code: "INVALID_SPECIAL_CODE", 
     error:
       lang === "en"
-        ? "Invalid test code."
-        : "Código de prueba inválido."
+        ? "Invalid special code."
+        : "Código especial inválido." 
   });
 }
 if (isTestAccount && !STRIPE_INTERNAL_TEST_COUPON_ID) {
@@ -729,7 +732,7 @@ if (isTestAccount && !STRIPE_INTERNAL_TEST_COUPON_ID) {
 } 
 const { purchaseType, rewardEligible } = getPurchaseFlags({
   isTestAccount,
-  isCourtesy: false
+  isCourtesy 
 }); 
 if (!fullName || !email || !phone || !country || !refCode) {
 return res.status(400).json({
@@ -810,11 +813,16 @@ redirectUrl:
 }
 const { phase: currentPhase } =
   await getCurrentCheckoutPhase(); 
+ const checkoutPriceCents = isCourtesy
+  ? currentPhase.priceCents - currentPhase.rewardGrossCents
+  : currentPhase.priceCents;
  const checkoutDiscounts = isTestAccount
   ? [{ coupon: STRIPE_INTERNAL_TEST_COUPON_ID }]
-  : STRIPE_LIVE_TEST_COUPON_ID
-    ? [{ coupon: STRIPE_LIVE_TEST_COUPON_ID }]
-    : [];
+  : isCourtesy
+    ? []
+    : STRIPE_LIVE_TEST_COUPON_ID
+      ? [{ coupon: STRIPE_LIVE_TEST_COUPON_ID }]
+      : [];
 const session = await stripe.checkout.sessions.create({
 mode: "payment",
 // Force Stripe Checkout to match the TMKP language flow.
@@ -829,7 +837,7 @@ customer_email: email,
         name: PRODUCT_NAME,
         description: PRODUCT_DESCRIPTION,
       },
-      unit_amount: currentPhase.priceCents,
+      unit_amount: checkoutPriceCents, 
     },
     quantity: 1,
   },
@@ -849,6 +857,7 @@ purchaseType,
 rewardEligible: rewardEligible ? "true" : "false",
  pricingPhase: String(currentPhase.phase),
 phasePriceCents: String(currentPhase.priceCents),
+ checkoutPriceCents: String(checkoutPriceCents),
 rewardGrossCents: String(currentPhase.rewardGrossCents),
 rewardCents: String(currentPhase.rewardCents),
 source: "tmkp_membership",
