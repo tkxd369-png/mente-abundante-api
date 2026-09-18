@@ -3099,6 +3099,7 @@ m.stripe_connect_account_id AS member_stripe_connect_account_id,
           c.payment_status,
           c.stripe_session_id,
           c.stripe_payment_intent,
+          c.is_test_account,
           c.paid_at,
 
           c.referral_status,
@@ -3138,6 +3139,14 @@ LEFT JOIN users m
 const referralsWithFunds = await Promise.all(
   rows.map(async (row) => {
     const sessionId = String(row.stripe_session_id || "");
+
+   if (row.is_test_account === true) {
+  return {
+    ...row,
+    stripe_mode: "LIVE",
+    funds_status: "TEST $0",
+  };
+}
 
     // Registros antiguos de prueba
     if (sessionId.startsWith("cs_test_")) {
