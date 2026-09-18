@@ -1646,6 +1646,8 @@ app.get("/referrals/activity", authMiddleware, async (req, res) => {
       SELECT
         email,
         referral_status,
+        purchase_type,
+reward_eligible,
         COALESCE(signup_used_at, created_at) AS joined_at
       FROM stripe_checkout_access
       WHERE UPPER(ref_code) = $1
@@ -1653,7 +1655,10 @@ app.get("/referrals/activity", authMiddleware, async (req, res) => {
         AND signup_used = TRUE
         AND user_id IS NOT NULL
         AND is_test_account = FALSE
-        AND referral_status IN ('pending', 'qualified')
+        AND (
+  referral_status IN ('pending', 'qualified')
+  OR purchase_type = 'courtesy'
+) 
       ORDER BY COALESCE(signup_used_at, created_at) DESC
       LIMIT 100;
       `,
@@ -1676,6 +1681,8 @@ app.get("/referrals/activity", authMiddleware, async (req, res) => {
       return {
         email: maskedEmail,
         status: row.referral_status,
+       purchaseType: row.purchase_type,
+        rewardEligible: row.reward_eligible,
         joinedAt: row.joined_at,
       };
     });
