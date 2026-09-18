@@ -869,19 +869,26 @@ mode: "payment",
 // Spanish uses Stripe's Latin American Spanish locale.
 locale: lang === "en" ? "en" : "es-419",
 customer_email: email,
- line_items: [
-  {
-    price_data: {
-      currency: "usd",
-      product_data: {
-        name: PRODUCT_NAME,
-        description: PRODUCT_DESCRIPTION,
+ line_items: isCourtesy
+  ? [
+      {
+        price_data: {
+          currency: "usd",
+          product_data: {
+            name: PRODUCT_NAME,
+            description: PRODUCT_DESCRIPTION,
+          },
+          unit_amount: checkoutPriceCents,
+        },
+        quantity: 1,
       },
-      unit_amount: checkoutPriceCents, 
-    },
-    quantity: 1,
-  },
-],
+    ]
+  : [
+      {
+        price: TMKP_STRIPE_PRICE_ID,
+        quantity: 1,
+      },
+    ],
 ...(checkoutDiscounts.length > 0
   ? { discounts: checkoutDiscounts }
   : {}), 
