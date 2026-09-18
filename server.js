@@ -411,26 +411,7 @@ const short = base.slice(0, 8);
 const last3 = (phoneDigits || "").slice(-3) || "000";
 return `${short}${last3}`;
 }
-function getCourtesyCode(refCode) {
-  const normalizedRefCode = String(refCode || "")
-    .trim()
-    .toUpperCase();
 
-  const secret = process.env.JWT_SECRET || "";
-
-  if (!normalizedRefCode || !secret) {
-    return "";
-  }
-
-  const hash = crypto
-    .createHmac("sha256", secret)
-    .update(`tmkp-courtesy:${normalizedRefCode}`)
-    .digest("hex")
-    .slice(0, 10)
-    .toUpperCase();
-
-  return `GIFT-${hash}`;
-}
 function hashCourtesyCode(code) {
   return crypto
     .createHash("sha256")
