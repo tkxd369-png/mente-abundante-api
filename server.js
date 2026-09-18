@@ -3790,7 +3790,7 @@ WHERE payment_status = 'paid'
     amount_total >= 49500
     OR purchase_type = 'courtesy'
   );
-
+`);
   const total = rows[0]?.total || 0;
 
   let current = TMK_PHASES[TMK_PHASES.length - 1];
