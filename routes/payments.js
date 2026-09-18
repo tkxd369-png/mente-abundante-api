@@ -165,6 +165,16 @@ ADD COLUMN IF NOT EXISTS reward_gross_cents INTEGER,
 ADD COLUMN IF NOT EXISTS reward_cents INTEGER;
 `);
  await pool.query(`
+CREATE TABLE IF NOT EXISTS courtesy_invites (
+  id BIGSERIAL PRIMARY KEY,
+  sponsor_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash TEXT NOT NULL UNIQUE,
+  stripe_session_id TEXT UNIQUE,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`);
+ await pool.query(`
 ALTER TABLE stripe_checkout_access
 ADD COLUMN IF NOT EXISTS referral_status TEXT NOT NULL DEFAULT 'none',
 ADD COLUMN IF NOT EXISTS referral_review_after TIMESTAMPTZ,
@@ -851,6 +861,10 @@ const { phase: currentPhase } =
       : [];
 const session = await stripe.checkout.sessions.create({
 mode: "payment",
+...(isCourtesy
+  ? { expires_at: Math.floor(Date.now() / 1000) + 55 * 60 }
+  : {}),
+ 
 // Force Stripe Checkout to match the TMKP language flow.
 // Spanish uses Stripe's Latin American Spanish locale.
 locale: lang === "en" ? "en" : "es-419",
