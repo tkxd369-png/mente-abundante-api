@@ -1714,12 +1714,15 @@ app.get("/referrals/activity", authMiddleware, async (req, res) => {
       }
 
       return {
-        email: maskedEmail,
-        status: row.referral_status,
-       purchaseType: row.purchase_type,
-        rewardEligible: row.reward_eligible,
-        joinedAt: row.joined_at,
-      };
+  email: maskedEmail,
+  status: row.referral_status,
+  purchaseType: row.purchase_type,
+  rewardEligible: row.reward_eligible,
+  joinedAt: row.joined_at,
+  rewardStatus: row.reward_status,
+  amountCents: Number(row.amount_cents || 0),
+  transferredAt: row.transferred_at,
+};
     });
 
     return res.json({
