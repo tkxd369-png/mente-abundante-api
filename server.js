@@ -1585,8 +1585,8 @@ app.get("/referrals/summary", authMiddleware, async (req, res) => {
       WHERE UPPER(ref_code) = $1
         AND payment_status = 'paid'
         AND signup_used = TRUE
-        AND user_id IS NOT NULL;
-        AND is_test_account = FALSE
+        AND user_id IS NOT NULL
+        AND is_test_account = FALSE;
       `,
       [refCode]
     );
