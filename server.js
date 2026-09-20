@@ -1568,37 +1568,63 @@ app.get("/referrals/summary", authMiddleware, async (req, res) => {
       });
     }
 
-    const summaryResult = await pool.query(
-      `
-      SELECT
-         COUNT(*)::int AS total,
+     const summaryResult = await pool.query(
+  `
+  SELECT
+    COUNT(*)::int AS total,
 
-        COUNT(*) FILTER (
-          WHERE referral_status = 'pending'
-        )::int AS pending,
+    COUNT(*) FILTER (
+      WHERE referral_status = 'pending'
+    )::int AS pending,
 
-        COUNT(*) FILTER (
-          WHERE referral_status = 'qualified'
-        )::int AS qualified
+    COUNT(*) FILTER (
+      WHERE referral_status = 'qualified'
+    )::int AS qualified,
 
-      FROM stripe_checkout_access
-      WHERE UPPER(ref_code) = $1
-        AND payment_status = 'paid'
-        AND signup_used = TRUE
-        AND user_id IS NOT NULL
-        AND is_test_account = FALSE;
-      `,
-      [refCode]
-    );
+    COUNT(*) FILTER (
+      WHERE purchase_type = 'courtesy'
+    )::int AS courtesy
 
-    const summary = summaryResult.rows[0] || {};
+  FROM stripe_checkout_access
+  WHERE UPPER(ref_code) = $1
+    AND payment_status = 'paid'
+    AND signup_used = TRUE
+    AND user_id IS NOT NULL
+    AND is_test_account = FALSE;
+  `,
+  [refCode]
+);
 
-    return res.json({
-      ok: true,
-      total: Number(summary.total || 0),
-      pending: Number(summary.pending || 0),
-      qualified: Number(summary.qualified || 0),
-    });
+const summary = summaryResult.rows[0] || {};
+
+const rewardsResult = await pool.query(
+  `
+  SELECT
+    COALESCE(SUM(amount_cents) FILTER (
+      WHERE status = 'qualified_waiting_funds'
+    ), 0)::bigint AS pending_reward_cents,
+
+    COALESCE(SUM(amount_cents) FILTER (
+      WHERE status = 'transferred'
+    ), 0)::bigint AS transferred_reward_cents
+
+  FROM referral_rewards
+  WHERE sponsor_user_id = $1;
+  `,
+  [req.userId]
+);
+
+const rewards = rewardsResult.rows[0] || {};
+   
+ return res.json({
+  ok: true,
+  total: Number(summary.total || 0),
+  pending: Number(summary.pending || 0),
+  qualified: Number(summary.qualified || 0),
+  courtesy: Number(summary.courtesy || 0),
+  pendingRewardCents: Number(rewards.pending_reward_cents || 0),
+  transferredRewardCents: Number(rewards.transferred_reward_cents || 0),
+});
   } catch (err) {
     console.error("GET /referrals/summary error:", err);
 
