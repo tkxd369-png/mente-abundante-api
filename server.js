@@ -1668,29 +1668,38 @@ app.get("/referrals/activity", authMiddleware, async (req, res) => {
     }
 
     const activityResult = await pool.query(
-      `
-      SELECT
-        email,
-        referral_status,
-        purchase_type,
-reward_eligible,
-        COALESCE(signup_used_at, created_at) AS joined_at
-      FROM stripe_checkout_access
-      WHERE UPPER(ref_code) = $1
-        AND payment_status = 'paid'
-        AND signup_used = TRUE
-        AND user_id IS NOT NULL
-        AND is_test_account = FALSE
-        AND (
-  referral_status IN ('pending', 'qualified')
-  OR purchase_type = 'courtesy'
-) 
-      ORDER BY COALESCE(signup_used_at, created_at) DESC
-      LIMIT 100;
-      `,
-      [refCode]
-    );
+  `
+  SELECT
+    c.email,
+    c.referral_status,
+    c.purchase_type,
+    c.reward_eligible,
+    COALESCE(c.signup_used_at, c.created_at) AS joined_at,
 
+    r.status AS reward_status,
+    r.amount_cents,
+    r.transferred_at
+
+  FROM stripe_checkout_access c
+
+  LEFT JOIN referral_rewards r
+    ON r.referral_checkout_id = c.id
+
+  WHERE UPPER(c.ref_code) = $1
+    AND c.payment_status = 'paid'
+    AND c.signup_used = TRUE
+    AND c.user_id IS NOT NULL
+    AND c.is_test_account = FALSE
+    AND (
+      c.referral_status IN ('pending', 'qualified')
+      OR c.purchase_type = 'courtesy'
+    )
+
+  ORDER BY COALESCE(c.signup_used_at, c.created_at) DESC
+  LIMIT 100;
+  `,
+  [refCode]
+);
     const referrals = activityResult.rows.map((row) => {
       const rawEmail = String(row.email || "").trim().toLowerCase();
       const at = rawEmail.indexOf("@");
