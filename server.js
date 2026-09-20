@@ -1710,7 +1710,7 @@ app.get("/referrals/activity", authMiddleware, async (req, res) => {
         const local = rawEmail.slice(0, at);
         const domain = rawEmail.slice(at + 1);
 
-        maskedEmail = `${local.slice(0, 1)}***@${domain}`;
+        maskedEmail = `${local.slice(0, 2)}***${local.slice(-1)}@${domain}`; 
       }
 
       return {
