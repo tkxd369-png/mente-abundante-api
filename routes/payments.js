@@ -675,9 +675,10 @@ rewardGrossCents,
 rewardCents,
 ]
 );
-if (refCode && status === "paid" && rewardEligible) { 
-const referralReviewAfter = addBusinessDays(new Date(), 1); 
-
+ if (refCode && status === "paid" && rewardEligible) { 
+  const reviewBusinessDays = crypto.randomInt(5, 8);
+  const referralReviewAfter =
+    addBusinessDays(new Date(), reviewBusinessDays);
 await pool.query(
 `
 UPDATE stripe_checkout_access
