@@ -51,7 +51,7 @@ const TMKP_CHECKOUT_PHASES = [
     priceCents: 127700,
     rewardGrossCents: 27700,
     rewardCents: 24930,
-    maxPayments: 100000
+    maxPayments: 50000
   },
   {
     phase: 4,
