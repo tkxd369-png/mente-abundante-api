@@ -977,6 +977,187 @@ app.get("/health", (req, res) => {
 res.json({ ok: true, ts: Date.now() });
 });
 // -------------------------
+// VIDEO ACCESS: signed R2 URLs
+// -------------------------
+app.get("/media/video-url", async (req, res) => {
+  try {
+    if (!r2 || !process.env.R2_BUCKET_NAME) {
+      return res.status(503).json({
+        ok: false,
+        error: "Video storage is not configured.",
+      });
+    }
+
+    const type = String(req.query?.type || "").trim().toLowerCase();
+    const lang =
+      String(req.query?.lang || "").trim().toLowerCase() === "en"
+        ? "en"
+        : "es";
+
+    let objectKey = "";
+    let expiresIn = 14400; // 4 horas 
+
+    // INTRO: antes del pago, requiere referral válido
+    if (type === "intro") {
+      const ref = String(req.query?.ref || "").trim().toUpperCase();
+
+      if (!ref) {
+        return res.status(400).json({
+          ok: false,
+          error: "Referral code is required.",
+        });
+      }
+
+      const refResult = await pool.query(
+        `
+        SELECT id
+        FROM users
+        WHERE UPPER(refid) = $1
+        LIMIT 1;
+        `,
+        [ref]
+      );
+
+      if (refResult.rows.length === 0) {
+        return res.status(403).json({
+          ok: false,
+          error: "Invalid referral code.",
+        });
+      }
+
+      objectKey =
+        lang === "en"
+          ? "videos/en/en_intro.mp4"
+          : "videos/es/es_intro.mp4";
+    }
+
+    // MAIN VIDEO: después del pago
+    else if (type === "main") {
+      const sessionId = String(req.query?.session_id || "").trim();
+      const continuationToken = String(req.query?.token || "").trim();
+      const part = Number(req.query?.part);
+
+      if (
+        !sessionId.startsWith("cs_") ||
+        !continuationToken ||
+        !Number.isInteger(part) ||
+        part < 1 ||
+        part > 6
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: "Invalid video access request.",
+        });
+      }
+
+      const paymentResult = await pool.query(
+        `
+        SELECT
+          payment_status,
+          signup_used,
+          continuation_email_sent_at,
+          continuation_token_hash,
+          lang
+        FROM stripe_checkout_access
+        WHERE stripe_session_id = $1
+        LIMIT 1;
+        `,
+        [sessionId]
+      );
+
+      if (paymentResult.rows.length === 0) {
+        return res.status(403).json({
+          ok: false,
+          error: "Payment session not found.",
+        });
+      }
+
+      const checkout = paymentResult.rows[0];
+
+      if (checkout.payment_status !== "paid") {
+        return res.status(402).json({
+          ok: false,
+          error: "Payment has not been confirmed.",
+        });
+      }
+
+      const providedTokenHash =
+        hashContinuationToken(continuationToken);
+
+      const storedTokenHash =
+        String(checkout.continuation_token_hash || "");
+
+      const tokenMatches =
+        /^[a-f0-9]{64}$/i.test(storedTokenHash) &&
+        crypto.timingSafeEqual(
+          Buffer.from(storedTokenHash, "hex"),
+          Buffer.from(providedTokenHash, "hex")
+        );
+
+      if (!tokenMatches) {
+        return res.status(403).json({
+          ok: false,
+          error: "Invalid verification token.",
+        });
+      }
+
+      if (!checkout.continuation_email_sent_at) {
+        return res.status(403).json({
+          ok: false,
+          error: "Email verification is required.",
+        });
+      }
+
+      const verificationExpiresAt =
+        new Date(checkout.continuation_email_sent_at).getTime() +
+        48 * 60 * 60 * 1000;
+
+      if (Date.now() > verificationExpiresAt) {
+        return res.status(410).json({
+          ok: false,
+          error: "Verification link has expired.",
+        });
+      }
+
+      objectKey =
+        lang === "en"
+          ? `videos/en/wcpart${part}.mp4`
+          : `videos/es/bvparte${part}.mp4`;
+    } else {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid video type.",
+      });
+    }
+
+    const command = new GetObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME,
+      Key: objectKey,
+      ResponseContentType: "video/mp4",
+      ResponseContentDisposition: "inline",
+    });
+
+    const url = await getSignedUrl(r2, command, {
+      expiresIn,
+    });
+
+    res.set("Cache-Control", "no-store");
+
+    return res.json({
+      ok: true,
+      url,
+      expiresIn,
+    });
+  } catch (err) {
+    console.error("GET /media/video-url error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Could not generate video access.",
+    });
+  }
+});
+// -------------------------
 // Verificar Access Key (refid)
 // -------------------------
 app.get("/auth/validate-ref/:refid", async (req, res) => {
