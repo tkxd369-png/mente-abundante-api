@@ -3357,6 +3357,9 @@ app.post(
         `
         SELECT
           c.id,
+          c.reward_eligible,
+c.is_test_account,
+c.reward_cents,
           c.stripe_session_id,
           c.stripe_payment_intent,
           c.ref_code,
@@ -3383,6 +3386,16 @@ app.post(
       }
 
       const referral = rows[0];
+     if (
+  referral.reward_eligible !== true ||
+  referral.is_test_account === true
+) {
+  return res.status(409).json({
+    ok: false,
+    code: "REFERRAL_REWARD_NOT_ELIGIBLE",
+    error: "This referral is not eligible for a reward.",
+  });
+}
 
       if (referral.referral_status !== "pending") {
         return res.status(409).json({
@@ -3479,11 +3492,16 @@ app.post(
         process.env.TMKP_LIVE_TEST_REWARD_CENTS || 0
       );
 
-      const rewardCents =
-        Number.isInteger(liveTestRewardCents) &&
-        liveTestRewardCents > 0
-          ? liveTestRewardCents
-          : 17820;
+      const phaseRewardCents = Number(referral.reward_cents);
+
+const rewardCents =
+  Number.isInteger(liveTestRewardCents) &&
+  liveTestRewardCents > 0
+    ? liveTestRewardCents
+    : Number.isInteger(phaseRewardCents) &&
+      phaseRewardCents > 0
+      ? phaseRewardCents
+      : 17820;
 
       const client = await pool.connect();
 
