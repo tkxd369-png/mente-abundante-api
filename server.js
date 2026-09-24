@@ -6,6 +6,8 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const Stripe = require("stripe");
+const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner"); 
 const app = express();
 const Resend = require("resend").Resend;
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -15,6 +17,16 @@ const stripe = process.env.STRIPE_SECRET_KEY
   : null;
 const stripeGlobalPayouts = process.env.STRIPE_GLOBAL_PAYOUTS_KEY
   ? new Stripe(process.env.STRIPE_GLOBAL_PAYOUTS_KEY)
+  : null;
+const r2 = process.env.R2_ENDPOINT
+  ? new S3Client({
+      region: "auto",
+      endpoint: process.env.R2_ENDPOINT,
+      credentials: {
+        accessKeyId: process.env.R2_ACCESS_KEY_ID,
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+      },
+    })
   : null;
 const STRIPE_GLOBAL_PAYOUTS_API_VERSION = "2026-08-26.preview"; 
 
