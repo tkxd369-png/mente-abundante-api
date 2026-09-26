@@ -1158,6 +1158,99 @@ app.get("/media/video-url", async (req, res) => {
   }
 });
 // -------------------------
+// STREAM: Intro protegido
+// -------------------------
+app.get("/media/stream-intro", async (req, res) => {
+  try {
+    const ref = String(req.query?.ref || "").trim().toUpperCase();
+
+    if (!ref) {
+      return res.status(400).json({
+        ok: false,
+        error: "Referral code is required.",
+      });
+    }
+
+    const refResult = await pool.query(
+      `
+      SELECT id
+      FROM users
+      WHERE UPPER(refid) = $1
+      LIMIT 1;
+      `,
+      [ref]
+    );
+
+    if (refResult.rows.length === 0) {
+      return res.status(403).json({
+        ok: false,
+        error: "Invalid referral code.",
+      });
+    }
+
+    const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+    const apiToken = process.env.CLOUDFLARE_STREAM_API_TOKEN;
+    const videoUid = process.env.CLOUDFLARE_STREAM_ES_INTRO_UID;
+    const customerCode = process.env.CLOUDFLARE_STREAM_CUSTOMER_CODE;
+
+    if (!accountId || !apiToken || !videoUid || !customerCode) {
+      return res.status(503).json({
+        ok: false,
+        error: "Stream is not configured.",
+      });
+    }
+
+    const cloudflareResponse = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/${videoUid}/token`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          exp: Math.floor(Date.now() / 1000) + 4 * 60 * 60,
+          downloadable: false,
+        }),
+      }
+    );
+
+    const data = await cloudflareResponse.json();
+
+    if (
+      !cloudflareResponse.ok ||
+      !data.success ||
+      !data.result?.token
+    ) {
+      console.error("Cloudflare Stream token error:", data);
+
+      return res.status(502).json({
+        ok: false,
+        error: "Could not generate secure video access.",
+      });
+    }
+
+    const playerUrl =
+      `https://customer-${customerCode}.cloudflarestream.com/` +
+      `${data.result.token}/iframe`;
+
+    res.set("Cache-Control", "no-store");
+
+    return res.json({
+      ok: true,
+      playerUrl,
+      expiresIn: 14400,
+    });
+  } catch (err) {
+    console.error("GET /media/stream-intro error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Could not generate secure video access.",
+    });
+  }
+});
+// -------------------------
 // Verificar Access Key (refid)
 // -------------------------
 app.get("/auth/validate-ref/:refid", async (req, res) => {
