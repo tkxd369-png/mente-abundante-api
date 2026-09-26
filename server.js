@@ -1254,6 +1254,177 @@ app.get("/media/stream-intro", async (req, res) => {
   }
 });
 // -------------------------
+// STREAM: Main video protegido
+// -------------------------
+app.get("/media/stream-main", async (req, res) => {
+  try {
+    const sessionId = String(req.query?.session_id || "").trim();
+    const continuationToken = String(req.query?.token || "").trim();
+
+    const lang =
+      String(req.query?.lang || "es").trim().toLowerCase() === "en"
+        ? "en"
+        : "es";
+
+    const part = Number(req.query?.part);
+
+    if (
+      !sessionId ||
+      !sessionId.startsWith("cs_") ||
+      !continuationToken
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "Valid payment access is required.",
+      });
+    }
+
+    if (!Number.isInteger(part) || part < 1 || part > 6) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid video part.",
+      });
+    }
+
+    const paymentResult = await pool.query(
+      `
+      SELECT
+        payment_status,
+        continuation_email_sent_at,
+        continuation_token_hash
+      FROM stripe_checkout_access
+      WHERE stripe_session_id = $1
+      LIMIT 1;
+      `,
+      [sessionId]
+    );
+
+    if (paymentResult.rows.length === 0) {
+      return res.status(403).json({
+        ok: false,
+        error: "Purchase not found.",
+      });
+    }
+
+    const checkout = paymentResult.rows[0];
+
+    if (checkout.payment_status !== "paid") {
+      return res.status(402).json({
+        ok: false,
+        error: "Payment has not been confirmed.",
+      });
+    }
+
+    const providedTokenHash =
+      hashContinuationToken(continuationToken);
+
+    const storedTokenHash =
+      String(checkout.continuation_token_hash || "");
+
+    const tokenMatches =
+      /^[a-f0-9]{64}$/i.test(storedTokenHash) &&
+      crypto.timingSafeEqual(
+        Buffer.from(storedTokenHash, "hex"),
+        Buffer.from(providedTokenHash, "hex")
+      );
+
+    if (!tokenMatches) {
+      return res.status(403).json({
+        ok: false,
+        error: "Invalid verification token.",
+      });
+    }
+
+    if (!checkout.continuation_email_sent_at) {
+      return res.status(403).json({
+        ok: false,
+        error: "Email verification is required.",
+      });
+    }
+
+    const verificationExpiresAt =
+      new Date(checkout.continuation_email_sent_at).getTime() +
+      48 * 60 * 60 * 1000;
+
+    if (Date.now() > verificationExpiresAt) {
+      return res.status(410).json({
+        ok: false,
+        error: "Verification link has expired.",
+      });
+    }
+
+    const uidKey =
+      lang === "en"
+        ? `CLOUDFLARE_STREAM_EN_WC${part}_UID`
+        : `CLOUDFLARE_STREAM_ES_BV${part}_UID`;
+
+    const videoUid = process.env[uidKey];
+
+    const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+    const apiToken = process.env.CLOUDFLARE_STREAM_API_TOKEN;
+    const customerCode =
+      process.env.CLOUDFLARE_STREAM_CUSTOMER_CODE;
+
+    if (!accountId || !apiToken || !customerCode || !videoUid) {
+      return res.status(503).json({
+        ok: false,
+        error: "Stream video is not configured.",
+      });
+    }
+
+    const cloudflareResponse = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/${videoUid}/token`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          exp: Math.floor(Date.now() / 1000) + 4 * 60 * 60,
+          downloadable: false,
+        }),
+      }
+    );
+
+    const data = await cloudflareResponse.json();
+
+    if (
+      !cloudflareResponse.ok ||
+      !data.success ||
+      !data.result?.token
+    ) {
+      console.error("Cloudflare Stream main token error:", data);
+
+      return res.status(502).json({
+        ok: false,
+        error: "Could not generate secure video access.",
+      });
+    }
+
+    const playerUrl =
+      `https://customer-${customerCode}.cloudflarestream.com/` +
+      `${data.result.token}/iframe`;
+
+    res.set("Cache-Control", "no-store");
+
+    return res.json({
+      ok: true,
+      playerUrl,
+      lang,
+      part,
+      expiresIn: 14400,
+    });
+  } catch (err) {
+    console.error("GET /media/stream-main error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Could not generate secure video access.",
+    });
+  }
+});
+// -------------------------
 // Verificar Access Key (refid)
 // -------------------------
 app.get("/auth/validate-ref/:refid", async (req, res) => {
