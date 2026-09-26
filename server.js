@@ -1163,7 +1163,7 @@ app.get("/media/video-url", async (req, res) => {
 app.get("/media/stream-intro", async (req, res) => {
   try {
     const ref = String(req.query?.ref || "").trim().toUpperCase();
-
+    const lang = String(req.query?.lang || "es").trim().toLowerCase();
     if (!ref) {
       return res.status(400).json({
         ok: false,
