@@ -1000,7 +1000,7 @@ app.get("/media/video-url", async (req, res) => {
     // INTRO: antes del pago, requiere referral válido
     if (type === "intro") {
       const ref = String(req.query?.ref || "").trim().toUpperCase();
-
+     
       if (!ref) {
         return res.status(400).json({
           ok: false,
@@ -1190,7 +1190,10 @@ app.get("/media/stream-intro", async (req, res) => {
 
     const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
     const apiToken = process.env.CLOUDFLARE_STREAM_API_TOKEN;
-    const videoUid = process.env.CLOUDFLARE_STREAM_ES_INTRO_UID;
+   const videoUid =
+  lang === "en"
+    ? process.env.CLOUDFLARE_STREAM_EN_INTRO_UID
+    : process.env.CLOUDFLARE_STREAM_ES_INTRO_UID;
     const customerCode = process.env.CLOUDFLARE_STREAM_CUSTOMER_CODE;
 
     if (!accountId || !apiToken || !videoUid || !customerCode) {
