@@ -4514,279 +4514,723 @@ const referralsWithFunds = await Promise.all(
     }
   }
 );
-// -------------------------
+ 
+  // -------------------------
 // ADMIN: verificar referido inmediatamente
+// Creator Collab aware
 // -------------------------
+
 app.post(
   "/admin/referral-verify-now",
   adminAuthMiddleware,
   async (req, res) => {
-    const referralCheckoutId = Number(req.body?.referralCheckoutId);
+
+    const referralCheckoutId =
+      Number(
+        req.body?.referralCheckoutId
+      );
+
 
     if (
-      !Number.isInteger(referralCheckoutId) ||
+      !Number.isInteger(
+        referralCheckoutId
+      ) ||
       referralCheckoutId <= 0
     ) {
+
       return res.status(400).json({
         ok: false,
         code: "INVALID_REFERRAL",
-        error: "A valid referral checkout ID is required.",
+        error:
+          "A valid referral checkout ID is required.",
       });
+
     }
+
 
     if (!stripe) {
+
       return res.status(503).json({
         ok: false,
-        error: "Stripe is not configured.",
+        error:
+          "Stripe is not configured.",
       });
+
     }
 
-    try {
-      const { rows } = await pool.query(
-        `
-        SELECT
-          c.id,
-          c.reward_eligible,
-c.is_test_account,
-c.reward_cents,
-          c.stripe_session_id,
-          c.stripe_payment_intent,
-          c.ref_code,
-          c.referral_status,
-          c.payment_status,
-          c.signup_used,
-          c.user_id,
-          COALESCE(u.account_status, 'active') AS account_status
-        FROM stripe_checkout_access c
-        LEFT JOIN users u
-          ON u.id = c.user_id
-        WHERE c.id = $1
-        LIMIT 1;
-        `,
-        [referralCheckoutId]
-      );
 
-      if (rows.length === 0) {
+    try {
+
+      const { rows } =
+        await pool.query(
+          `
+          SELECT
+            c.id,
+            c.reward_eligible,
+            c.is_test_account,
+            c.reward_cents,
+            c.purchase_type,
+            c.stripe_session_id,
+            c.stripe_payment_intent,
+            c.ref_code,
+            c.referral_status,
+            c.payment_status,
+            c.signup_used,
+            c.user_id,
+
+            COALESCE(
+              u.account_status,
+              'active'
+            ) AS account_status
+
+          FROM stripe_checkout_access c
+
+          LEFT JOIN users u
+            ON u.id = c.user_id
+
+          WHERE c.id = $1
+
+          LIMIT 1;
+          `,
+          [referralCheckoutId]
+        );
+
+
+      if (
+        rows.length === 0
+      ) {
+
         return res.status(404).json({
           ok: false,
           code: "REFERRAL_NOT_FOUND",
-          error: "Referral not found.",
+          error:
+            "Referral not found.",
         });
+
       }
 
-      const referral = rows[0];
-     if (
-  referral.reward_eligible !== true ||
-  referral.is_test_account === true
-) {
-  return res.status(409).json({
-    ok: false,
-    code: "REFERRAL_REWARD_NOT_ELIGIBLE",
-    error: "This referral is not eligible for a reward.",
-  });
-}
 
-      if (referral.referral_status !== "pending") {
+      const referral =
+        rows[0];
+
+
+      if (
+        referral.reward_eligible !== true ||
+        referral.is_test_account === true
+      ) {
+
         return res.status(409).json({
           ok: false,
-          code: "REFERRAL_NOT_PENDING",
-          error: "This referral is no longer pending.",
+          code:
+            "REFERRAL_REWARD_NOT_ELIGIBLE",
+          error:
+            "This referral is not eligible for verification.",
         });
+
       }
+
+
+      if (
+        referral.referral_status !==
+        "pending"
+      ) {
+
+        return res.status(409).json({
+          ok: false,
+          code:
+            "REFERRAL_NOT_PENDING",
+          error:
+            "This referral is no longer pending.",
+        });
+
+      }
+
 
       if (
         referral.payment_status !== "paid" ||
         referral.signup_used !== true ||
         !referral.user_id
       ) {
+
         return res.status(409).json({
           ok: false,
-          code: "REFERRAL_NOT_READY",
-          error: "This referral is not ready for verification.",
+          code:
+            "REFERRAL_NOT_READY",
+          error:
+            "This referral is not ready for verification.",
         });
+
       }
 
-      if (referral.account_status !== "active") {
+
+      if (
+        referral.account_status !== "active"
+      ) {
+
         return res.status(409).json({
           ok: false,
           code: "MEMBER_RESTRICTED",
-          error: "The referred member account is restricted.",
+          error:
+            "The referred member account is restricted.",
         });
+
       }
 
-      const sessionId = String(referral.stripe_session_id || "");
 
-      if (!sessionId.startsWith("cs_live_")) {
-        return res.status(409).json({
-          ok: false,
-          code: "LIVE_REFERRAL_REQUIRED",
-          error: "Only Live referrals can be verified here.",
-        });
-      }
-
-      let paymentIntentId = String(
-        referral.stripe_payment_intent || ""
-      ).trim();
-
-      if (!paymentIntentId) {
-        const session =
-          await stripe.checkout.sessions.retrieve(sessionId);
-
-        paymentIntentId =
-          typeof session.payment_intent === "string"
-            ? session.payment_intent
-            : session.payment_intent?.id || "";
-      }
-
-      if (!paymentIntentId) {
-        return res.status(409).json({
-          ok: false,
-          code: "PAYMENT_INTENT_MISSING",
-          error: "Stripe payment information is missing.",
-        });
-      }
-
-      const paymentIntent =
-        await stripe.paymentIntents.retrieve(
-          paymentIntentId,
-          {
-            expand: ["latest_charge"],
-          }
+      const sessionId =
+        String(
+          referral.stripe_session_id || ""
         );
 
-      const charge =
-        typeof paymentIntent.latest_charge === "string"
-          ? await stripe.charges.retrieve(
-              paymentIntent.latest_charge
-            )
-          : paymentIntent.latest_charge;
 
       if (
-        paymentIntent.status !== "succeeded" ||
-        !charge ||
-        charge.paid !== true ||
-        charge.captured === false ||
-        charge.disputed === true ||
-        Number(charge.amount_refunded || 0) > 0
+        !sessionId.startsWith(
+          "cs_live_"
+        )
       ) {
+
         return res.status(409).json({
           ok: false,
-          code: "STRIPE_PAYMENT_NOT_ELIGIBLE",
+          code:
+            "LIVE_REFERRAL_REQUIRED",
+          error:
+            "Only Live referrals can be verified here.",
+        });
+
+      }
+
+
+      let paymentIntentId =
+        String(
+          referral.stripe_payment_intent ||
+          ""
+        ).trim();
+
+
+      if (!paymentIntentId) {
+
+        const session =
+          await stripe
+            .checkout
+            .sessions
+            .retrieve(
+              sessionId
+            );
+
+
+        paymentIntentId =
+          typeof session.payment_intent ===
+          "string"
+
+            ? session.payment_intent
+
+            : session.payment_intent?.id ||
+              "";
+
+      }
+
+
+      if (!paymentIntentId) {
+
+        return res.status(409).json({
+          ok: false,
+          code:
+            "PAYMENT_INTENT_MISSING",
+          error:
+            "Stripe payment information is missing.",
+        });
+
+      }
+
+
+      const paymentIntent =
+        await stripe
+          .paymentIntents
+          .retrieve(
+            paymentIntentId,
+            {
+              expand: [
+                "latest_charge"
+              ],
+            }
+          );
+
+
+      const charge =
+
+        typeof
+          paymentIntent.latest_charge ===
+          "string"
+
+          ? await stripe
+              .charges
+              .retrieve(
+                paymentIntent.latest_charge
+              )
+
+          : paymentIntent.latest_charge;
+
+
+      if (
+        paymentIntent.status !==
+          "succeeded" ||
+
+        !charge ||
+
+        charge.paid !== true ||
+
+        charge.captured === false ||
+
+        charge.disputed === true ||
+
+        Number(
+          charge.amount_refunded || 0
+        ) > 0
+      ) {
+
+        return res.status(409).json({
+          ok: false,
+          code:
+            "STRIPE_PAYMENT_NOT_ELIGIBLE",
           error:
             "Stripe payment is not eligible for referral approval.",
         });
+
       }
 
-      const liveTestRewardCents = Number(
-        process.env.TMKP_LIVE_TEST_REWARD_CENTS || 0
-      );
 
-      const phaseRewardCents = Number(referral.reward_cents);
-
-const rewardCents =
-  Number.isInteger(liveTestRewardCents) &&
-  liveTestRewardCents > 0
-    ? liveTestRewardCents
-    : Number.isInteger(phaseRewardCents) &&
-      phaseRewardCents > 0
-      ? phaseRewardCents
-      : 17820;
-
-      const client = await pool.connect();
-
-      try {
-        await client.query("BEGIN");
-
-        const updateResult = await client.query(
-          `
-          UPDATE stripe_checkout_access
-          SET referral_status = 'qualified',
-              referral_approved_at = COALESCE(
-                referral_approved_at,
-                NOW()
-              ),
-              stripe_payment_intent = COALESCE(
-                stripe_payment_intent,
-                $2
-              ),
-              updated_at = NOW()
-          WHERE id = $1
-            AND referral_status = 'pending'
-          RETURNING id;
-          `,
-          [referralCheckoutId, paymentIntentId]
+      const liveTestRewardCents =
+        Number(
+          process.env
+            .TMKP_LIVE_TEST_REWARD_CENTS ||
+          0
         );
 
-        if (updateResult.rowCount !== 1) {
-          await client.query("ROLLBACK");
+
+      const phaseRewardCents =
+        Number(
+          referral.reward_cents
+        );
+
+
+      const rewardCents =
+
+        Number.isInteger(
+          liveTestRewardCents
+        ) &&
+        liveTestRewardCents > 0
+
+          ? liveTestRewardCents
+
+          : Number.isInteger(
+              phaseRewardCents
+            ) &&
+            phaseRewardCents > 0
+
+            ? phaseRewardCents
+
+            : 17820;
+
+
+      const client =
+        await pool.connect();
+
+
+      try {
+
+        await client.query(
+          "BEGIN"
+        );
+
+
+        // =============================================
+        // Find sponsor
+        // =============================================
+
+        const sponsorResult =
+          await client.query(
+            `
+            SELECT
+              id,
+              refid
+            FROM users
+            WHERE UPPER(refid) = UPPER($1)
+            LIMIT 1;
+            `,
+            [referral.ref_code]
+          );
+
+
+        if (
+          sponsorResult.rows.length !== 1
+        ) {
+
+          await client.query(
+            "ROLLBACK"
+          );
+
 
           return res.status(409).json({
             ok: false,
-            code: "REFERRAL_ALREADY_PROCESSED",
-            error: "Referral was already processed.",
+            code:
+              "SPONSOR_NOT_FOUND",
+            error:
+              "The sponsor for this referral could not be found.",
           });
+
         }
 
-        const rewardResult = await client.query(
-          `
-          INSERT INTO referral_rewards (
-            referral_checkout_id,
-            sponsor_user_id,
-            amount_cents,
-            currency,
-            status,
-            qualified_at
-          )
-          SELECT
-            $1,
-            s.id,
-            $2,
-            'usd',
-            'qualified_waiting_funds',
-            NOW()
-          FROM users s
-          WHERE UPPER(s.refid) = UPPER($3)
-          ON CONFLICT (referral_checkout_id) DO NOTHING
-          RETURNING id;
-          `,
-          [
-            referralCheckoutId,
-            rewardCents,
-            referral.ref_code,
-          ]
+
+        const sponsorUserId =
+          sponsorResult.rows[0].id;
+
+
+        // =============================================
+        // Check if sponsor is a Creator
+        // =============================================
+
+        const creatorResult =
+          await client.query(
+            `
+            SELECT
+              user_id,
+              reward_unlock_count
+
+            FROM creator_profiles
+
+            WHERE user_id = $1
+
+            FOR UPDATE;
+            `,
+            [sponsorUserId]
+          );
+
+
+        const isCreator =
+          creatorResult.rows.length === 1;
+
+
+        let creatorUnlockCount = 3;
+
+        let creatorQualifiedBefore = 0;
+
+        let shouldCreateReward = true;
+
+
+        if (isCreator) {
+
+          creatorUnlockCount =
+            Number(
+              creatorResult.rows[0]
+                .reward_unlock_count
+            );
+
+
+          if (
+            !Number.isInteger(
+              creatorUnlockCount
+            ) ||
+            creatorUnlockCount < 1
+          ) {
+
+            creatorUnlockCount = 3;
+
+          }
+
+
+          // Count PREVIOUS qualified referrals.
+          // The current referral is still pending,
+          // so it is not included.
+
+          const progressResult =
+            await client.query(
+              `
+              SELECT
+                COUNT(*)::int
+                  AS qualified_count
+
+              FROM stripe_checkout_access
+
+              WHERE
+                UPPER(ref_code) =
+                  UPPER($1)
+
+                AND payment_status =
+                  'paid'
+
+                AND signup_used = TRUE
+
+                AND user_id IS NOT NULL
+
+                AND referral_status =
+                  'qualified'
+
+                AND purchase_type =
+                  'normal'
+
+                AND is_test_account =
+                  FALSE;
+              `,
+              [referral.ref_code]
+            );
+
+
+          creatorQualifiedBefore =
+            Number(
+              progressResult
+                .rows[0]
+                ?.qualified_count || 0
+            );
+
+
+          // Referrals #1–#3:
+          // qualify, but no reward.
+          //
+          // Referral #4+:
+          // normal TMKP reward.
+
+          shouldCreateReward =
+            creatorQualifiedBefore >=
+            creatorUnlockCount;
+
+        }
+
+
+        // =============================================
+        // Qualify referral
+        // =============================================
+
+        const updateResult =
+          await client.query(
+            `
+            UPDATE stripe_checkout_access
+
+            SET
+
+              referral_status =
+                'qualified',
+
+              referral_approved_at =
+                COALESCE(
+                  referral_approved_at,
+                  NOW()
+                ),
+
+              stripe_payment_intent =
+                COALESCE(
+                  stripe_payment_intent,
+                  $2
+                ),
+
+              reward_eligible =
+                CASE
+
+                  WHEN $3::boolean = TRUE
+                    THEN reward_eligible
+
+                  ELSE FALSE
+
+                END,
+
+              updated_at = NOW()
+
+            WHERE id = $1
+              AND referral_status =
+                'pending'
+
+            RETURNING id;
+            `,
+            [
+              referralCheckoutId,
+              paymentIntentId,
+              shouldCreateReward,
+            ]
+          );
+
+
+        if (
+          updateResult.rowCount !== 1
+        ) {
+
+          await client.query(
+            "ROLLBACK"
+          );
+
+
+          return res.status(409).json({
+            ok: false,
+            code:
+              "REFERRAL_ALREADY_PROCESSED",
+            error:
+              "Referral was already processed.",
+          });
+
+        }
+
+
+        // =============================================
+        // Create reward only for:
+        // - normal members
+        // - Creator referral #4+
+        // =============================================
+
+        let rewardStatus = null;
+
+
+        if (shouldCreateReward) {
+
+          const rewardResult =
+            await client.query(
+              `
+              INSERT INTO referral_rewards (
+                referral_checkout_id,
+                sponsor_user_id,
+                amount_cents,
+                currency,
+                status,
+                qualified_at
+              )
+
+              VALUES (
+                $1,
+                $2,
+                $3,
+                'usd',
+                'qualified_waiting_funds',
+                NOW()
+              )
+
+              ON CONFLICT (
+                referral_checkout_id
+              )
+
+              DO NOTHING
+
+              RETURNING id;
+              `,
+              [
+                referralCheckoutId,
+                sponsorUserId,
+                rewardCents,
+              ]
+            );
+
+
+          if (
+            rewardResult.rowCount !== 1
+          ) {
+
+            throw new Error(
+              "Referral reward could not be created."
+            );
+
+          }
+
+
+          rewardStatus =
+            "qualified_waiting_funds";
+
+        }
+
+
+        await client.query(
+          "COMMIT"
         );
 
-        if (rewardResult.rowCount !== 1) {
-          throw new Error(
-            "Referral reward could not be created."
-          );
+
+        // =============================================
+        // RESPONSE
+        // =============================================
+
+        if (
+          isCreator &&
+          !shouldCreateReward
+        ) {
+
+          const creatorProgress =
+            creatorQualifiedBefore + 1;
+
+
+          return res.json({
+
+            ok: true,
+
+            qualified: true,
+
+            referralCheckoutId,
+
+            creator: true,
+
+            creatorUnlock: true,
+
+            creatorProgress,
+
+            creatorUnlockCount,
+
+            rewardsUnlocked:
+              creatorProgress >=
+              creatorUnlockCount,
+
+            rewardCreated: false,
+
+            rewardStatus: null,
+
+          });
+
         }
 
-        await client.query("COMMIT");
 
         return res.json({
+
           ok: true,
+
           qualified: true,
+
           referralCheckoutId,
-          rewardStatus: "qualified_waiting_funds",
+
+          creator:
+            isCreator,
+
+          rewardCreated: true,
+
+          rewardStatus,
+
         });
+
+
       } catch (err) {
-        await client.query("ROLLBACK").catch(() => {});
+
+        await client.query(
+          "ROLLBACK"
+        ).catch(() => {});
+
+
         throw err;
+
+
       } finally {
+
         client.release();
+
       }
+
+
     } catch (err) {
+
       console.error(
         "POST /admin/referral-verify-now error:",
         err
       );
 
+
       return res.status(500).json({
         ok: false,
-        error: "Could not verify referral.",
+        error:
+          "Could not verify referral.",
       });
+
     }
+
   }
 );
  
