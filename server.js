@@ -183,6 +183,111 @@ CREATE TABLE IF NOT EXISTS courtesy_invites (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `);
+await pool.query(`
+CREATE TABLE IF NOT EXISTS creator_invites (
+  id BIGSERIAL PRIMARY KEY,
+
+  email TEXT NOT NULL,
+
+  code_hash TEXT NOT NULL UNIQUE,
+
+  tier TEXT NOT NULL
+    CHECK (tier IN (
+      '2k_5k',
+      '5k_10k',
+      '10k_20k'
+    )),
+
+  follower_count INTEGER,
+
+  platform TEXT,
+
+  handle TEXT,
+
+  lang TEXT NOT NULL DEFAULT 'en',
+
+  creator_fee_cents INTEGER NOT NULL,
+
+  pass_cents INTEGER NOT NULL DEFAULT 700,
+
+  collab_payout_cents INTEGER NOT NULL, 
+
+  status TEXT NOT NULL DEFAULT 'invited',
+
+  created_by_admin_id BIGINT
+    REFERENCES users(id)
+    ON DELETE SET NULL,
+
+  activated_user_id BIGINT
+    REFERENCES users(id)
+    ON DELETE SET NULL,
+
+  stripe_session_id TEXT UNIQUE,
+
+  expires_at TIMESTAMPTZ NOT NULL,
+
+  used_at TIMESTAMPTZ,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`);
+
+
+await pool.query(`
+CREATE INDEX IF NOT EXISTS idx_creator_invites_email
+ON creator_invites (LOWER(email));
+`);
+
+
+await pool.query(`
+CREATE INDEX IF NOT EXISTS idx_creator_invites_status
+ON creator_invites (status);
+`);
+
+
+await pool.query(`
+CREATE TABLE IF NOT EXISTS creator_profiles (
+
+  user_id BIGINT PRIMARY KEY
+    REFERENCES users(id)
+    ON DELETE CASCADE,
+
+  creator_invite_id BIGINT UNIQUE
+    REFERENCES creator_invites(id)
+    ON DELETE SET NULL,
+
+  tier TEXT NOT NULL
+    CHECK (tier IN (
+      '2k_5k',
+      '5k_10k',
+      '10k_20k'
+    )),
+
+  follower_count INTEGER,
+
+  platform TEXT,
+
+  handle TEXT,
+
+  creator_fee_cents INTEGER NOT NULL,
+
+  pass_cents INTEGER NOT NULL DEFAULT 700,
+
+  reward_unlock_count INTEGER NOT NULL DEFAULT 3,
+
+  creator_status TEXT NOT NULL DEFAULT 'active',
+
+  first_collab_status TEXT NOT NULL DEFAULT 'pending',
+
+  first_collab_paid_at TIMESTAMPTZ,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`); 
  await pool.query(`
 CREATE INDEX IF NOT EXISTS idx_referral_rewards_sponsor_status
 ON referral_rewards (sponsor_user_id, status);
@@ -429,6 +534,92 @@ function hashCourtesyCode(code) {
     .createHash("sha256")
     .update(String(code || "").trim().toUpperCase())
     .digest("hex");
+}
+// =========================================================
+// TMKP CREATOR COLLAB
+// Tiers + private invite helpers
+// =========================================================
+
+const CREATOR_PASS_CENTS = 700;
+
+const CREATOR_INVITE_TTL_HOURS = 168; // 7 days
+
+const CREATOR_TIERS = Object.freeze({
+
+  "2k_5k": {
+    minFollowers: 2000,
+    maxFollowers: 4999,
+    creatorFeeCents: 10000,
+    collabPayoutCents: 10700,
+  },
+
+  "5k_10k": {
+    minFollowers: 5000,
+    maxFollowers: 9999,
+    creatorFeeCents: 20000,
+    collabPayoutCents: 20700,
+  },
+
+  "10k_20k": {
+    minFollowers: 10000,
+    maxFollowers: 20000,
+    creatorFeeCents: 30000,
+    collabPayoutCents: 30700,
+  },
+
+});
+
+
+function createCreatorInviteCode() {
+
+  return crypto
+    .randomBytes(32)
+    .toString("hex");
+
+}
+
+
+function hashCreatorInviteCode(code) {
+
+  return crypto
+    .createHash("sha256")
+    .update(String(code || "").trim())
+    .digest("hex");
+
+}
+
+
+function getCreatorTierConfig(tierRaw) {
+
+  const tier =
+    String(tierRaw || "")
+      .trim();
+
+  return CREATOR_TIERS[tier] || null;
+
+}
+
+
+function creatorFollowerCountMatchesTier(
+  followerCount,
+  tierConfig
+) {
+
+  const followers =
+    Number(followerCount);
+
+  if (
+    !Number.isInteger(followers) ||
+    !tierConfig
+  ) {
+    return false;
+  }
+
+  return (
+    followers >= tierConfig.minFollowers &&
+    followers <= tierConfig.maxFollowers
+  );
+
 }
 // -------------------------
 // Middlewares de auth
@@ -3468,6 +3659,544 @@ console.error("POST /admin/login error:", err);
 return res.status(500).json({ ok: false, error: "Server error" });
 }
 });
+ // =========================================================
+// ADMIN: CREATE TMKP CREATOR COLLAB INVITE
+// =========================================================
+
+app.post(
+  "/admin/creator-invites",
+  adminAuthMiddleware,
+  async (req, res) => {
+
+    try {
+
+      const {
+        email,
+        tier,
+        follower_count,
+        platform,
+        handle,
+        lang,
+      } = req.body || {};
+
+
+      const normalizedEmail =
+        normalizeEmail(email);
+
+
+      if (
+        !normalizedEmail ||
+        !isValidEmail(normalizedEmail)
+      ) {
+
+        return res.status(400).json({
+          ok: false,
+          code: "INVALID_EMAIL",
+          error: "A valid creator email is required.",
+        });
+
+      }
+
+
+      const tierConfig =
+        getCreatorTierConfig(tier);
+
+
+      if (!tierConfig) {
+
+        return res.status(400).json({
+          ok: false,
+          code: "INVALID_CREATOR_TIER",
+          error: "Invalid Creator Collab tier.",
+        });
+
+      }
+
+
+      const followers =
+        Number(follower_count);
+
+
+      if (
+        !creatorFollowerCountMatchesTier(
+          followers,
+          tierConfig
+        )
+      ) {
+
+        return res.status(400).json({
+          ok: false,
+          code: "FOLLOWER_COUNT_TIER_MISMATCH",
+          error:
+            "Follower count does not match the selected Creator tier.",
+        });
+
+      }
+
+
+      const creatorLang =
+        String(lang || "")
+          .trim()
+          .toLowerCase() === "es"
+          ? "es"
+          : "en";
+
+
+      const cleanPlatform =
+        String(platform || "")
+          .trim()
+          .slice(0, 80);
+
+
+      const cleanHandle =
+        String(handle || "")
+          .trim()
+          .slice(0, 120);
+
+
+      const inviteCode =
+        createCreatorInviteCode();
+
+
+      const codeHash =
+        hashCreatorInviteCode(
+          inviteCode
+        );
+
+
+      const expiresAt =
+        new Date(
+          Date.now() +
+          CREATOR_INVITE_TTL_HOURS *
+          60 *
+          60 *
+          1000
+        );
+
+
+      const client =
+        await pool.connect();
+
+
+      try {
+
+        await client.query("BEGIN");
+
+
+        // Invalidate any previous unused invite
+        // for this same creator email.
+
+        await client.query(
+          `
+          UPDATE creator_invites
+          SET
+            status = 'superseded',
+            updated_at = NOW()
+          WHERE LOWER(email) = LOWER($1)
+            AND used_at IS NULL
+            AND status = 'invited';
+          `,
+          [normalizedEmail]
+        );
+
+
+        const { rows } =
+          await client.query(
+            `
+            INSERT INTO creator_invites (
+              email,
+              code_hash,
+              tier,
+              follower_count,
+              platform,
+              handle,
+              lang,
+              creator_fee_cents,
+              pass_cents,
+              collab_payout_cents,
+              status,
+              created_by_admin_id,
+              expires_at
+            )
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              $5,
+              $6,
+              $7,
+              $8,
+              $9,
+              $10,
+              'invited',
+              $11,
+              $12
+            )
+            RETURNING
+              id,
+              email,
+              tier,
+              follower_count,
+              platform,
+              handle,
+              lang,
+              creator_fee_cents,
+              pass_cents,
+              collab_payout_cents,
+              status,
+              expires_at,
+              created_at;
+            `,
+            [
+              normalizedEmail,
+              codeHash,
+              tier,
+              followers,
+              cleanPlatform || null,
+              cleanHandle || null,
+              creatorLang,
+              tierConfig.creatorFeeCents,
+              CREATOR_PASS_CENTS,
+              tierConfig.collabPayoutCents,
+              req.adminId,
+              expiresAt,
+            ]
+          );
+
+
+        await client.query(
+          "COMMIT"
+        );
+
+
+        const creatorInvite =
+          rows[0];
+
+
+        const inviteUrl =
+          `https://themasterkeyprogram.com/creator-access.html?invite=${encodeURIComponent(inviteCode)}`;
+
+
+        return res.status(201).json({
+
+          ok: true,
+
+          creatorInvite: {
+
+            ...creatorInvite,
+
+            creator_fee:
+              Number(
+                creatorInvite.creator_fee_cents
+              ) / 100,
+
+            pass_amount:
+              Number(
+                creatorInvite.pass_cents
+              ) / 100,
+
+            collab_payout:
+              Number(
+                creatorInvite.collab_payout_cents
+              ) / 100,
+
+            inviteUrl,
+
+          },
+
+        });
+
+
+      } catch (err) {
+
+        await client.query(
+          "ROLLBACK"
+        );
+
+        throw err;
+
+      } finally {
+
+        client.release();
+
+      }
+
+
+    } catch (err) {
+
+      console.error(
+        "POST /admin/creator-invites error:",
+        err
+      );
+
+
+      return res.status(500).json({
+        ok: false,
+        error: "Server error",
+      });
+
+    }
+
+  }
+);
+// =========================================================
+// PUBLIC: VALIDATE TMKP CREATOR COLLAB INVITE
+// =========================================================
+
+app.get(
+  "/creator/invite/validate",
+  async (req, res) => {
+
+    try {
+
+      const inviteCode =
+        String(req.query.invite || "")
+          .trim();
+
+
+      if (!inviteCode) {
+
+        return res.status(400).json({
+          ok: false,
+          code: "MISSING_CREATOR_INVITE",
+          error: "Creator invite is required.",
+        });
+
+      }
+
+
+      const codeHash =
+        hashCreatorInviteCode(
+          inviteCode
+        );
+
+
+      const { rows } =
+        await pool.query(
+          `
+          SELECT
+            id,
+            email,
+            tier,
+            follower_count,
+            platform,
+            handle,
+            lang,
+            creator_fee_cents,
+            pass_cents,
+            collab_payout_cents,
+            status,
+            expires_at,
+            used_at
+          FROM creator_invites
+          WHERE code_hash = $1
+          LIMIT 1;
+          `,
+          [codeHash]
+        );
+
+
+      const invite =
+        rows[0];
+
+
+      if (!invite) {
+
+        return res.status(404).json({
+          ok: false,
+          code: "INVALID_CREATOR_INVITE",
+          error: "Creator invite is invalid.",
+        });
+
+      }
+
+
+      if (
+        invite.used_at ||
+        invite.status === "activated"
+      ) {
+
+        return res.status(410).json({
+          ok: false,
+          code: "CREATOR_INVITE_ALREADY_USED",
+          error: "This Creator invite has already been used.",
+        });
+
+      }
+
+
+      if (
+        invite.status !== "invited"
+      ) {
+
+        return res.status(410).json({
+          ok: false,
+          code: "CREATOR_INVITE_UNAVAILABLE",
+          error: "This Creator invite is no longer available.",
+        });
+
+      }
+
+
+      const expiresAt =
+        new Date(invite.expires_at);
+
+
+      if (
+        Number.isNaN(expiresAt.getTime()) ||
+        expiresAt.getTime() <= Date.now()
+      ) {
+
+        await pool.query(
+          `
+          UPDATE creator_invites
+          SET
+            status = 'expired',
+            updated_at = NOW()
+          WHERE id = $1
+            AND status = 'invited';
+          `,
+          [invite.id]
+        );
+
+
+        return res.status(410).json({
+          ok: false,
+          code: "CREATOR_INVITE_EXPIRED",
+          error: "This Creator invite has expired.",
+        });
+
+      }
+
+
+      const emailParts =
+        String(invite.email || "")
+          .split("@");
+
+
+      let maskedEmail =
+        "Creator";
+
+
+      if (
+        emailParts.length === 2
+      ) {
+
+        const local =
+          emailParts[0];
+
+        const domain =
+          emailParts[1];
+
+
+        maskedEmail =
+          `${
+            local.slice(0, 2)
+          }***@${
+            domain
+          }`;
+
+      }
+
+
+      let tierLabel =
+        invite.tier;
+
+
+      if (
+        invite.tier === "2k_5k"
+      ) {
+
+        tierLabel =
+          "2,000 – 4,999";
+
+      } else if (
+        invite.tier === "5k_10k"
+      ) {
+
+        tierLabel =
+          "5,000 – 9,999";
+
+      } else if (
+        invite.tier === "10k_20k"
+      ) {
+
+        tierLabel =
+          "10,000 – 20,000";
+
+      }
+
+
+      return res.json({
+
+        ok: true,
+
+        creatorInvite: {
+
+          valid: true,
+
+          email:
+            maskedEmail,
+
+          tier:
+            invite.tier,
+
+          tier_label:
+            tierLabel,
+
+          follower_count:
+            invite.follower_count,
+
+          platform:
+            invite.platform,
+
+          handle:
+            invite.handle,
+
+          lang:
+            invite.lang,
+
+          creator_fee:
+            Number(
+              invite.creator_fee_cents
+            ) / 100,
+
+          pass_amount:
+            Number(
+              invite.pass_cents
+            ) / 100,
+
+          collab_payout:
+            Number(
+              invite.collab_payout_cents
+            ) / 100,
+
+          expires_at:
+            invite.expires_at,
+
+        },
+
+      });
+
+
+    } catch (err) {
+
+      console.error(
+        "GET /creator/invite/validate error:",
+        err
+      );
+
+
+      return res.status(500).json({
+        ok: false,
+        error: "Server error",
+      });
+
+    }
+
+  }
+);
 // -------------------------
 // ADMIN: stats
 // -------------------------
