@@ -111,125 +111,379 @@ paymentIntentId,
 chargeId: charge.id,
 };
 }
-async function qualifyDueReferrals() {
-const { rows } = await pool.query(`
-SELECT
-id,
-stripe_session_id,
-stripe_payment_intent,
-user_id,
-email,
-ref_code,
-lang,
-paid_at,
-reward_cents,
-referral_review_after
-FROM stripe_checkout_access
-WHERE payment_status = 'paid'
-AND signup_used = TRUE
-AND user_id IS NOT NULL
-AND referral_status = 'pending'
-AND reward_eligible = TRUE
-AND is_test_account = FALSE
-AND referral_review_after IS NOT NULL
-AND referral_review_after <= NOW()
-AND ref_code IS NOT NULL
-AND TRIM(ref_code) <> ''
-ORDER BY referral_review_after ASC
-LIMIT 100;
-`);
-console.log(`[referral-review] Due referrals: ${rows.length}`);
-for (const row of rows) {
-try {
-const stripeCheck = await verifyStripePayment(row);
-if (!stripeCheck.eligible) {
-console.log(
-`[referral-review] Keeping pending: ${row.stripe_session_id} (${stripeCheck.reason})`
-);
-continue;
-}
- const phaseRewardCents = Number(row.reward_cents);
+ async function qualifyDueReferrals() {
 
-const rewardAmountCents =
-  Number.isInteger(LIVE_TEST_REWARD_CENTS) &&
-  LIVE_TEST_REWARD_CENTS > 0
-    ? LIVE_TEST_REWARD_CENTS
-    : Number.isInteger(phaseRewardCents) &&
-      phaseRewardCents > 0
-      ? phaseRewardCents
-      : 17820;
-const client = await pool.connect();
-
-try {
-  await client.query("BEGIN");
-
-  const result = await client.query(
-    `
-    UPDATE stripe_checkout_access
-    SET referral_status = 'qualified',
-        referral_approved_at = COALESCE(referral_approved_at, NOW()),
-        stripe_payment_intent = COALESCE(stripe_payment_intent, $2),
-        updated_at = NOW()
-    WHERE id = $1
+  const { rows } = await pool.query(`
+    SELECT
+      id,
+      stripe_session_id,
+      stripe_payment_intent,
+      user_id,
+      email,
+      ref_code,
+      lang,
+      paid_at,
+      reward_cents,
+      referral_review_after
+    FROM stripe_checkout_access
+    WHERE payment_status = 'paid'
+      AND signup_used = TRUE
+      AND user_id IS NOT NULL
       AND referral_status = 'pending'
-    RETURNING id, stripe_session_id, ref_code;
-    `,
-    [row.id, stripeCheck.paymentIntentId]
+      AND reward_eligible = TRUE
+      AND is_test_account = FALSE
+      AND referral_review_after IS NOT NULL
+      AND referral_review_after <= NOW()
+      AND ref_code IS NOT NULL
+      AND TRIM(ref_code) <> ''
+    ORDER BY referral_review_after ASC
+    LIMIT 100;
+  `);
+
+
+  console.log(
+    `[referral-review] Due referrals: ${rows.length}`
   );
 
-  if (result.rowCount === 1) {
-    const rewardInsert = await client.query(
-      `
-      INSERT INTO referral_rewards (
-        referral_checkout_id,
-        sponsor_user_id,
-        amount_cents,
-        currency,
-        status,
-        qualified_at
-      )
-      SELECT
-        $1,
-        s.id,
-        $2,
-        'usd',
-       'qualified_waiting_funds', 
-        NOW()
-      FROM users s
-      WHERE UPPER(s.refid) = UPPER($3)
-      RETURNING id;
-      `,
-     [row.id, rewardAmountCents, row.ref_code] 
-    );
 
-    if (rewardInsert.rowCount !== 1) {
-      throw new Error(
-        `Reward ledger entry could not be created for ${row.stripe_session_id}`
+  for (const row of rows) {
+
+    try {
+
+      const stripeCheck =
+        await verifyStripePayment(row);
+
+
+      if (!stripeCheck.eligible) {
+
+        console.log(
+          `[referral-review] Keeping pending: ${row.stripe_session_id} (${stripeCheck.reason})`
+        );
+
+        continue;
+
+      }
+
+
+      const phaseRewardCents =
+        Number(row.reward_cents);
+
+
+      const rewardAmountCents =
+        Number.isInteger(LIVE_TEST_REWARD_CENTS) &&
+        LIVE_TEST_REWARD_CENTS > 0
+          ? LIVE_TEST_REWARD_CENTS
+          : Number.isInteger(phaseRewardCents) &&
+            phaseRewardCents > 0
+            ? phaseRewardCents
+            : 17820;
+
+
+      const client =
+        await pool.connect();
+
+
+      try {
+
+        await client.query("BEGIN");
+
+
+        // ==================================================
+        // Find sponsor
+        // ==================================================
+
+        const sponsorResult =
+          await client.query(
+            `
+            SELECT id
+            FROM users
+            WHERE UPPER(refid) = UPPER($1)
+            LIMIT 1;
+            `,
+            [row.ref_code]
+          );
+
+
+        if (
+          sponsorResult.rows.length !== 1
+        ) {
+
+          throw new Error(
+            `Sponsor not found for referral code ${row.ref_code}`
+          );
+
+        }
+
+
+        const sponsorUserId =
+          sponsorResult.rows[0].id;
+
+
+        // ==================================================
+        // Is the sponsor a TMKP Creator?
+        // Lock Creator profile so two referrals cannot
+        // unlock rewards at the same time.
+        // ==================================================
+
+        const creatorResult =
+          await client.query(
+            `
+            SELECT
+              user_id,
+              reward_unlock_count
+            FROM creator_profiles
+            WHERE user_id = $1
+            FOR UPDATE;
+            `,
+            [sponsorUserId]
+          );
+
+
+        const isCreator =
+          creatorResult.rows.length === 1;
+
+
+        let shouldCreateReward = true;
+
+        let creatorQualifiedBefore = 0;
+
+        let creatorUnlockCount = 3;
+
+
+        if (isCreator) {
+
+          creatorUnlockCount =
+            Number(
+              creatorResult.rows[0]
+                .reward_unlock_count
+            );
+
+
+          if (
+            !Number.isInteger(
+              creatorUnlockCount
+            ) ||
+            creatorUnlockCount < 1
+          ) {
+
+            creatorUnlockCount = 3;
+
+          }
+
+
+          // Count PREVIOUS qualified normal referrals.
+          // Current referral is still pending here,
+          // so it is not included yet.
+
+          const creatorProgressResult =
+            await client.query(
+              `
+              SELECT
+                COUNT(*)::int AS qualified_count
+              FROM stripe_checkout_access
+              WHERE UPPER(ref_code) = UPPER($1)
+                AND payment_status = 'paid'
+                AND signup_used = TRUE
+                AND user_id IS NOT NULL
+                AND referral_status = 'qualified'
+                AND purchase_type = 'normal'
+                AND is_test_account = FALSE;
+              `,
+              [row.ref_code]
+            );
+
+
+          creatorQualifiedBefore =
+            Number(
+              creatorProgressResult
+                .rows[0]
+                ?.qualified_count || 0
+            );
+
+
+          // First 3 qualified referrals unlock rewards.
+          // Referral #4 and later create rewards.
+
+          shouldCreateReward =
+            creatorQualifiedBefore >=
+            creatorUnlockCount;
+
+        }
+
+
+        // ==================================================
+        // Qualify referral
+        // ==================================================
+
+        const result =
+          await client.query(
+            `
+            UPDATE stripe_checkout_access
+            SET
+              referral_status = 'qualified',
+
+              referral_approved_at =
+                COALESCE(
+                  referral_approved_at,
+                  NOW()
+                ),
+
+              stripe_payment_intent =
+                COALESCE(
+                  stripe_payment_intent,
+                  $2
+                ),
+
+              reward_eligible =
+                CASE
+                  WHEN $3::boolean = TRUE
+                    THEN reward_eligible
+                  ELSE FALSE
+                END,
+
+              updated_at = NOW()
+
+            WHERE id = $1
+              AND referral_status = 'pending'
+
+            RETURNING
+              id,
+              stripe_session_id,
+              ref_code;
+            `,
+            [
+              row.id,
+              stripeCheck.paymentIntentId,
+              shouldCreateReward,
+            ]
+          );
+
+
+        if (
+          result.rowCount !== 1
+        ) {
+
+          await client.query(
+            "ROLLBACK"
+          );
+
+          continue;
+
+        }
+
+
+        // ==================================================
+        // NORMAL MEMBER OR CREATOR #4+
+        // Create actual reward
+        // ==================================================
+
+        if (shouldCreateReward) {
+
+          const rewardInsert =
+            await client.query(
+              `
+              INSERT INTO referral_rewards (
+                referral_checkout_id,
+                sponsor_user_id,
+                amount_cents,
+                currency,
+                status,
+                qualified_at
+              )
+              VALUES (
+                $1,
+                $2,
+                $3,
+                'usd',
+                'qualified_waiting_funds',
+                NOW()
+              )
+              ON CONFLICT (
+                referral_checkout_id
+              )
+              DO NOTHING
+              RETURNING id;
+              `,
+              [
+                row.id,
+                sponsorUserId,
+                rewardAmountCents,
+              ]
+            );
+
+
+          if (
+            rewardInsert.rowCount !== 1
+          ) {
+
+            throw new Error(
+              `Reward ledger entry could not be created for ${row.stripe_session_id}`
+            );
+
+          }
+
+        }
+
+
+        await client.query(
+          "COMMIT"
+        );
+
+
+        // ==================================================
+        // LOGGING
+        // ==================================================
+
+        if (
+          isCreator &&
+          !shouldCreateReward
+        ) {
+
+          const newProgress =
+            creatorQualifiedBefore + 1;
+
+
+          console.log(
+            `[referral-review] CREATOR UNLOCK: ${row.stripe_session_id} -> ${row.ref_code} (${newProgress}/${creatorUnlockCount})`
+          );
+
+        } else {
+
+          console.log(
+            `[referral-review] QUALIFIED: ${row.stripe_session_id} -> ${row.ref_code}`
+          );
+
+        }
+
+
+      } catch (dbErr) {
+
+        await client.query(
+          "ROLLBACK"
+        ).catch(() => {});
+
+
+        throw dbErr;
+
+
+      } finally {
+
+        client.release();
+
+      }
+
+
+    } catch (err) {
+
+      console.error(
+        `[referral-review] Could not review ${row.stripe_session_id}:`,
+        err
       );
+
     }
 
-    await client.query("COMMIT");
-
-    console.log(
-      `[referral-review] QUALIFIED: ${row.stripe_session_id} -> ${row.ref_code}`
-    );
-  } else {
-    await client.query("ROLLBACK");
   }
-} catch (dbErr) {
-  await client.query("ROLLBACK").catch(() => {});
-  throw dbErr;
-} finally {
-  client.release();
-}
-  
-} catch (err) {
-console.error(
-`[referral-review] Could not review ${row.stripe_session_id}:`,
-err
-);
-}
-}
+
 }
 async function processQualifiedRewards() {
   const { rows } = await pool.query(`
