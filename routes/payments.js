@@ -634,15 +634,35 @@ WHERE stripe_session_id = $1;
 );
 console.log(`[payments/email] Continuation email sent for ${sessionId}.`);
 }
-async function upsertCheckoutRecord(session, fallback = {}) {
-if (!pool) throw new Error("Database is not configured.");
-const metadata = session.metadata || {};
-const email = normalizeEmail(
-session.customer_details?.email ||
-session.customer_email ||
-metadata.email ||
-fallback.email
-);
+ const metadata = session.metadata || {};
+
+const metadataPurchaseType =
+  clean(
+    metadata.purchaseType ??
+    fallback.purchaseType ??
+    "",
+    20
+  ).toLowerCase();
+
+
+// Creator invitations are approved for one specific email.
+// For Creator Pass purchases, always preserve the
+// server-approved invitation email stored in metadata.
+const email =
+  metadataPurchaseType === "creator"
+
+    ? normalizeEmail(
+        metadata.email ||
+        fallback.email
+      )
+
+    : normalizeEmail(
+        session.customer_details?.email ||
+        session.customer_email ||
+        metadata.email ||
+        fallback.email
+      );
+
 if (!email) throw new Error("Checkout Session does not contain an email.");
 const fullName = clean(
 session.customer_details?.name ||
