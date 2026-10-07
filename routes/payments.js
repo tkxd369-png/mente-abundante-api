@@ -326,6 +326,139 @@ async function releaseCourtesyInvite(sessionId) {
     [sessionId]
   );
 }
+// =========================================================
+// TMKP CREATOR COLLAB - INVITE HELPERS
+// =========================================================
+
+function hashCreatorInviteCode(code) {
+  return crypto
+    .createHash("sha256")
+    .update(String(code || "").trim())
+    .digest("hex");
+}
+
+
+async function getCreatorInviteForCheckout(inviteCode) {
+
+  const provided =
+    String(inviteCode || "").trim();
+
+  if (!provided || !pool) {
+    return null;
+  }
+
+
+  const codeHash =
+    hashCreatorInviteCode(provided);
+
+
+  const { rows } =
+    await pool.query(
+      `
+      SELECT
+        id,
+        email,
+        tier,
+        follower_count,
+        platform,
+        handle,
+        lang,
+        creator_fee_cents,
+        pass_cents,
+        collab_payout_cents,
+        status,
+        expires_at,
+        used_at,
+        stripe_session_id
+      FROM creator_invites
+      WHERE code_hash = $1
+      LIMIT 1;
+      `,
+      [codeHash]
+    );
+
+
+  return rows[0] || null;
+}
+
+
+async function reserveCreatorInvite(
+  inviteId,
+  sessionId
+) {
+
+  const result =
+    await pool.query(
+      `
+      UPDATE creator_invites
+      SET
+        stripe_session_id = $2,
+        updated_at = NOW()
+      WHERE id = $1
+        AND status = 'invited'
+        AND used_at IS NULL
+        AND expires_at > NOW()
+        AND stripe_session_id IS NULL;
+      `,
+      [
+        inviteId,
+        sessionId,
+      ]
+    );
+
+
+  return result.rowCount === 1;
+}
+
+
+async function markCreatorInvitePaid(
+  sessionId
+) {
+
+  if (!pool || !sessionId) {
+    return;
+  }
+
+
+  await pool.query(
+    `
+    UPDATE creator_invites
+    SET
+      status = 'paid',
+      used_at = COALESCE(used_at, NOW()),
+      updated_at = NOW()
+    WHERE stripe_session_id = $1
+      AND status = 'invited';
+    `,
+    [sessionId]
+  );
+
+}
+
+
+async function releaseCreatorInvite(
+  sessionId
+) {
+
+  if (!pool || !sessionId) {
+    return;
+  }
+
+
+  await pool.query(
+    `
+    UPDATE creator_invites
+    SET
+      stripe_session_id = NULL,
+      updated_at = NOW()
+    WHERE stripe_session_id = $1
+      AND status = 'invited'
+      AND used_at IS NULL;
+    `,
+    [sessionId]
+  );
+
+}
 function getPurchaseFlags({ isTestAccount = false, isCourtesy = false } = {}) {
   if (isTestAccount) {
     return {
@@ -721,6 +854,622 @@ mode: STRIPE_SECRET_KEY.startsWith("sk_test_")
 checkoutAmountCents: CHECKOUT_AMOUNT_CENTS,
 });
 });
+// =========================================================
+// TMKP CREATOR COLLAB - $7 CREATOR PASS CHECKOUT
+// =========================================================
+
+router.post(
+  "/create-creator-checkout",
+  async (req, res) => {
+
+    try {
+
+      await paymentsReady;
+
+
+      if (!stripe) {
+
+        return res.status(503).json({
+          ok: false,
+          error: "Stripe is not configured.",
+        });
+
+      }
+
+
+      if (!pool) {
+
+        return res.status(503).json({
+          ok: false,
+          error: "Database is not configured.",
+        });
+
+      }
+
+
+      const inviteCode =
+        String(
+          req.body?.invite || ""
+        ).trim();
+
+
+      const fullName =
+        clean(
+          req.body?.fullName,
+          180
+        );
+
+
+      const phone =
+        clean(
+          req.body?.phone,
+          60
+        );
+
+
+      const country =
+        clean(
+          req.body?.country,
+          8
+        ).toUpperCase();
+
+
+      if (
+        !inviteCode ||
+        !fullName ||
+        !phone ||
+        !country
+      ) {
+
+        return res.status(400).json({
+          ok: false,
+          code: "MISSING_CREATOR_CHECKOUT_DATA",
+          error:
+            "Creator invite, full name, phone and country are required.",
+        });
+
+      }
+
+
+      const invite =
+        await getCreatorInviteForCheckout(
+          inviteCode
+        );
+
+
+      if (!invite) {
+
+        return res.status(404).json({
+          ok: false,
+          code: "INVALID_CREATOR_INVITE",
+          error:
+            "Creator invitation is invalid.",
+        });
+
+      }
+
+
+      const lang =
+        normalizeLang(
+          invite.lang
+        );
+
+
+      if (
+        invite.used_at ||
+        invite.status === "paid" ||
+        invite.status === "activated"
+      ) {
+
+        return res.status(410).json({
+          ok: false,
+          code: "CREATOR_INVITE_ALREADY_USED",
+          error:
+            lang === "en"
+              ? "This Creator invitation has already been used."
+              : "Esta invitación Creator ya fue utilizada.",
+        });
+
+      }
+
+
+      if (
+        invite.status !== "invited"
+      ) {
+
+        return res.status(410).json({
+          ok: false,
+          code: "CREATOR_INVITE_UNAVAILABLE",
+          error:
+            lang === "en"
+              ? "This Creator invitation is no longer available."
+              : "Esta invitación Creator ya no está disponible.",
+        });
+
+      }
+
+
+      const inviteExpiresAt =
+        new Date(
+          invite.expires_at
+        );
+
+
+      if (
+        Number.isNaN(
+          inviteExpiresAt.getTime()
+        ) ||
+        inviteExpiresAt.getTime() <= Date.now()
+      ) {
+
+        await pool.query(
+          `
+          UPDATE creator_invites
+          SET
+            status = 'expired',
+            updated_at = NOW()
+          WHERE id = $1
+            AND status = 'invited';
+          `,
+          [invite.id]
+        );
+
+
+        return res.status(410).json({
+          ok: false,
+          code: "CREATOR_INVITE_EXPIRED",
+          error:
+            lang === "en"
+              ? "This Creator invitation has expired."
+              : "Esta invitación Creator ha expirado.",
+        });
+
+      }
+
+
+      if (country !== "US") {
+
+        return res.status(400).json({
+          ok: false,
+          code: "COUNTRY_NOT_YET_AVAILABLE",
+          error:
+            lang === "en"
+              ? "TMKP Creator Collab is currently available only in the United States."
+              : "TMKP Creator Collab está disponible actualmente solo en Estados Unidos.",
+        });
+
+      }
+
+
+      const email =
+        normalizeEmail(
+          invite.email
+        );
+
+
+      if (!email) {
+
+        return res.status(400).json({
+          ok: false,
+          code: "CREATOR_EMAIL_MISSING",
+          error:
+            "Creator invitation does not contain a valid email.",
+        });
+
+      }
+
+
+      // -----------------------------------------
+      // Prevent duplicate TMKP memberships
+      // -----------------------------------------
+
+      const existingUser =
+        await pool.query(
+          `
+          SELECT id
+          FROM users
+          WHERE LOWER(email) = LOWER($1)
+
+          UNION ALL
+
+          SELECT u.id
+          FROM account_email_history h
+          JOIN users u
+            ON u.id = h.user_id
+          WHERE LOWER(h.email) = LOWER($1)
+
+          LIMIT 1;
+          `,
+          [email]
+        );
+
+
+      if (
+        existingUser.rows.length > 0
+      ) {
+
+        return res.status(409).json({
+          ok: false,
+          code: "ACCOUNT_EXISTS",
+          error:
+            lang === "en"
+              ? "A TMKP account already exists for this email."
+              : "Ya existe una cuenta TMKP con este correo.",
+        });
+
+      }
+
+
+      // -----------------------------------------
+      // If this invite already has an open
+      // Stripe Checkout, resume it.
+      // -----------------------------------------
+
+      if (
+        invite.stripe_session_id
+      ) {
+
+        try {
+
+          const existingSession =
+            await stripe.checkout.sessions.retrieve(
+              invite.stripe_session_id
+            );
+
+
+          if (
+            existingSession.payment_status === "paid"
+          ) {
+
+            await markCreatorInvitePaid(
+              existingSession.id
+            );
+
+
+            return res.status(409).json({
+              ok: false,
+              code: "CREATOR_PAYMENT_ALREADY_CONFIRMED",
+              error:
+                lang === "en"
+                  ? "Your Creator Pass payment has already been confirmed."
+                  : "El pago de tu Creator Pass ya fue confirmado.",
+              redirectUrl:
+                `${SITE_URL}/payment-confirmed.html?lang=${lang}`,
+            });
+
+          }
+
+
+          if (
+            existingSession.status === "open" &&
+            existingSession.url
+          ) {
+
+            return res.json({
+              ok: true,
+              resumed: true,
+              checkoutUrl:
+                existingSession.url,
+            });
+
+          }
+
+
+          await releaseCreatorInvite(
+            existingSession.id
+          );
+
+
+        } catch (err) {
+
+          console.warn(
+            "[payments/create-creator-checkout] Could not resume old session:",
+            err.message
+          );
+
+
+          await releaseCreatorInvite(
+            invite.stripe_session_id
+          );
+
+        }
+
+      }
+
+
+      // -----------------------------------------
+      // Make sure there is not another already
+      // paid unused checkout for this email.
+      // -----------------------------------------
+
+      const existingPaidCheckout =
+        await pool.query(
+          `
+          SELECT stripe_session_id
+          FROM stripe_checkout_access
+          WHERE LOWER(email) = LOWER($1)
+            AND payment_status = 'paid'
+            AND signup_used = FALSE
+          ORDER BY updated_at DESC
+          LIMIT 1;
+          `,
+          [email]
+        );
+
+
+      if (
+        existingPaidCheckout.rows.length > 0
+      ) {
+
+        return res.status(409).json({
+          ok: false,
+          code: "PAYMENT_ALREADY_CONFIRMED",
+          error:
+            lang === "en"
+              ? "A confirmed TMKP payment already exists for this email."
+              : "Ya existe un pago confirmado de TMKP para este correo.",
+          redirectUrl:
+            `${SITE_URL}/payment-confirmed.html?lang=${lang}`,
+        });
+
+      }
+
+
+      const creatorPassCents =
+        Number(
+          invite.pass_cents
+        );
+
+
+      if (
+        !Number.isInteger(
+          creatorPassCents
+        ) ||
+        creatorPassCents !== 700
+      ) {
+
+        return res.status(500).json({
+          ok: false,
+          code: "INVALID_CREATOR_PASS_AMOUNT",
+          error:
+            "Creator Pass amount is not configured correctly.",
+        });
+
+      }
+
+
+      const session =
+        await stripe.checkout.sessions.create({
+
+          mode: "payment",
+
+          expires_at:
+            Math.floor(
+              Date.now() / 1000
+            ) +
+            55 * 60,
+
+          locale:
+            lang === "en"
+              ? "en"
+              : "es-419",
+
+          customer_email:
+            email,
+
+
+          line_items: [
+
+            {
+
+              price_data: {
+
+                currency: "usd",
+
+                product_data: {
+
+                  name:
+                    "TMKP Creator Pass",
+
+                  description:
+                    "Approved Creator Collab access to The Master Key Program.",
+
+                },
+
+                unit_amount:
+                  creatorPassCents,
+
+              },
+
+              quantity: 1,
+
+            },
+
+          ],
+
+
+          metadata: {
+
+            fullName,
+            email,
+            phone,
+            country,
+
+            refCode: "",
+
+            lang,
+
+            isTestAccount:
+              "false",
+
+            purchaseType:
+              "creator",
+
+            rewardEligible:
+              "false",
+
+            pricingPhase:
+              "0",
+
+            phasePriceCents:
+              String(
+                creatorPassCents
+              ),
+
+            checkoutPriceCents:
+              String(
+                creatorPassCents
+              ),
+
+            rewardGrossCents:
+              "0",
+
+            rewardCents:
+              "0",
+
+            creatorInviteId:
+              String(
+                invite.id
+              ),
+
+            creatorTier:
+              String(
+                invite.tier
+              ),
+
+            source:
+              "tmkp_creator_pass",
+
+          },
+
+
+          payment_intent_data: {
+
+            metadata: {
+
+              email,
+
+              creatorInviteId:
+                String(
+                  invite.id
+                ),
+
+              creatorTier:
+                String(
+                  invite.tier
+                ),
+
+              source:
+                "tmkp_creator_pass",
+
+            },
+
+          },
+
+
+          success_url:
+            `${SITE_URL}/payment-confirmed.html?lang=${lang}&creator=1`,
+
+
+          cancel_url:
+            `${SITE_URL}/creator-access.html?invite=${encodeURIComponent(inviteCode)}`,
+
+        });
+
+
+      const reserved =
+        await reserveCreatorInvite(
+          invite.id,
+          session.id
+        );
+
+
+      if (!reserved) {
+
+        await stripe.checkout.sessions
+          .expire(
+            session.id
+          )
+          .catch(() => {});
+
+
+        return res.status(409).json({
+          ok: false,
+          code: "CREATOR_INVITE_ALREADY_RESERVED",
+          error:
+            lang === "en"
+              ? "This Creator invitation is already being used."
+              : "Esta invitación Creator ya está siendo utilizada.",
+        });
+
+      }
+
+
+      await upsertCheckoutRecord(
+        session,
+        {
+
+          fullName,
+          email,
+          phone,
+          country,
+
+          refCode: "",
+
+          lang,
+
+          isTestAccount: false,
+
+          purchaseType:
+            "creator",
+
+          rewardEligible:
+            false,
+
+          pricingPhase: 0,
+
+          phasePriceCents:
+            creatorPassCents,
+
+          rewardGrossCents: 0,
+
+          rewardCents: 0,
+
+          paymentStatus:
+            "pending",
+
+        }
+      );
+
+
+      return res.json({
+
+        ok: true,
+
+        checkoutUrl:
+          session.url,
+
+      });
+
+
+    } catch (err) {
+
+      console.error(
+        "[payments/create-creator-checkout]",
+        err
+      );
+
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "Could not create Creator Pass Checkout Session.",
+      });
+
+    }
+
+  }
+);
 router.post("/create-checkout", async (req, res) => {
 try {
 await paymentsReady;
@@ -967,78 +1716,267 @@ error: "Could not create Stripe Checkout Session.",
 });
 }
 });
-router.post("/webhook", async (req, res) => {
-if (!stripe) {
-return res.status(503).send("Stripe is not configured.");
-}
-if (!STRIPE_WEBHOOK_SECRET) {
-return res.status(503).send("Stripe webhook secret is not configured.");
-}
-const signature = req.headers["stripe-signature"];
-const payload = Buffer.isBuffer(req.rawBody)
-? req.rawBody
-: Buffer.isBuffer(req.body)
-? req.body
-: null;
-if (!payload) {
-return res.status(500).send(
-"Webhook raw body is unavailable. Configure server.js to preserve req.rawBody."
-);
-}
-let event;
-try {
-event = stripe.webhooks.constructEvent(
-payload,
-signature,
-STRIPE_WEBHOOK_SECRET
-);
-} catch (err) {
-console.error(
-"[payments/webhook] Signature verification failed:",
-err.message
-);
-return res.status(400).send(`Webhook Error: ${err.message}`);
-}
-try {
-await paymentsReady;
-switch (event.type) {
-case "checkout.session.completed": {
-const session = event.data.object;
-await upsertCheckoutRecord(session);
- if (session.payment_status === "paid") {
-  await markCourtesyInviteUsed(session.id);
-}
-await sendPaymentContinuationEmailIfNeeded(session.id);
-break;
-}
-case "checkout.session.async_payment_succeeded": {
-const session = event.data.object;
-session.payment_status = "paid";
-await upsertCheckoutRecord(session);
- await markCourtesyInviteUsed(session.id);
-await sendPaymentContinuationEmailIfNeeded(session.id);
-break;
-}
-case "checkout.session.async_payment_failed": {
-const session = event.data.object;
-await setCheckoutStatus(session.id, "failed");
- await releaseCourtesyInvite(session.id);
-break;
-}
-case "checkout.session.expired": {
-const session = event.data.object;
-await setCheckoutStatus(session.id, "expired");
- await releaseCourtesyInvite(session.id);
-break;
-}
-default:
-break;
-}
-return res.json({ received: true });
-} catch (err) {
-console.error("[payments/webhook] Handler error:", err);
-return res.status(500).send("Webhook handler failed.");
-}
+ router.post("/webhook", async (req, res) => {
+
+  if (!stripe) {
+
+    return res
+      .status(503)
+      .send("Stripe is not configured.");
+
+  }
+
+
+  if (!STRIPE_WEBHOOK_SECRET) {
+
+    return res
+      .status(503)
+      .send(
+        "Stripe webhook secret is not configured."
+      );
+
+  }
+
+
+  const signature =
+    req.headers["stripe-signature"];
+
+
+  const payload =
+    Buffer.isBuffer(req.rawBody)
+      ? req.rawBody
+      : Buffer.isBuffer(req.body)
+        ? req.body
+        : null;
+
+
+  if (!payload) {
+
+    return res
+      .status(500)
+      .send(
+        "Webhook raw body is unavailable. Configure server.js to preserve req.rawBody."
+      );
+
+  }
+
+
+  let event;
+
+
+  try {
+
+    event =
+      stripe.webhooks.constructEvent(
+        payload,
+        signature,
+        STRIPE_WEBHOOK_SECRET
+      );
+
+
+  } catch (err) {
+
+    console.error(
+      "[payments/webhook] Signature verification failed:",
+      err.message
+    );
+
+
+    return res
+      .status(400)
+      .send(
+        `Webhook Error: ${err.message}`
+      );
+
+  }
+
+
+  try {
+
+    await paymentsReady;
+
+
+    switch (event.type) {
+
+
+      // =====================================================
+      // CHECKOUT COMPLETED
+      // =====================================================
+
+      case "checkout.session.completed": {
+
+        const session =
+          event.data.object;
+
+
+        await upsertCheckoutRecord(
+          session
+        );
+
+
+        if (
+          session.payment_status === "paid"
+        ) {
+
+          // Existing courtesy flow
+          await markCourtesyInviteUsed(
+            session.id
+          );
+
+
+          // Creator Pass flow
+          await markCreatorInvitePaid(
+            session.id
+          );
+
+        }
+
+
+        await sendPaymentContinuationEmailIfNeeded(
+          session.id
+        );
+
+
+        break;
+
+      }
+
+
+      // =====================================================
+      // ASYNC PAYMENT SUCCEEDED
+      // =====================================================
+
+      case "checkout.session.async_payment_succeeded": {
+
+        const session =
+          event.data.object;
+
+
+        session.payment_status =
+          "paid";
+
+
+        await upsertCheckoutRecord(
+          session
+        );
+
+
+        // Existing courtesy flow
+        await markCourtesyInviteUsed(
+          session.id
+        );
+
+
+        // Creator Pass flow
+        await markCreatorInvitePaid(
+          session.id
+        );
+
+
+        await sendPaymentContinuationEmailIfNeeded(
+          session.id
+        );
+
+
+        break;
+
+      }
+
+
+      // =====================================================
+      // ASYNC PAYMENT FAILED
+      // =====================================================
+
+      case "checkout.session.async_payment_failed": {
+
+        const session =
+          event.data.object;
+
+
+        await setCheckoutStatus(
+          session.id,
+          "failed"
+        );
+
+
+        // Existing courtesy flow
+        await releaseCourtesyInvite(
+          session.id
+        );
+
+
+        // Creator Pass flow
+        await releaseCreatorInvite(
+          session.id
+        );
+
+
+        break;
+
+      }
+
+
+      // =====================================================
+      // CHECKOUT EXPIRED
+      // =====================================================
+
+      case "checkout.session.expired": {
+
+        const session =
+          event.data.object;
+
+
+        await setCheckoutStatus(
+          session.id,
+          "expired"
+        );
+
+
+        // Existing courtesy flow
+        await releaseCourtesyInvite(
+          session.id
+        );
+
+
+        // Creator Pass flow
+        await releaseCreatorInvite(
+          session.id
+        );
+
+
+        break;
+
+      }
+
+
+      default:
+
+        break;
+
+    }
+
+
+    return res.json({
+      received: true
+    });
+
+
+  } catch (err) {
+
+    console.error(
+      "[payments/webhook] Handler error:",
+      err
+    );
+
+
+    return res
+      .status(500)
+      .send(
+        "Webhook handler failed."
+      );
+
+  }
+
 });
 router.post("/resend-continuation", async (req, res) => {
   try {
