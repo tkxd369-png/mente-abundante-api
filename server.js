@@ -183,6 +183,59 @@ CREATE TABLE IF NOT EXISTS courtesy_invites (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `);
+ await pool.query(`
+ALTER TABLE courtesy_invites
+ADD COLUMN IF NOT EXISTS invite_type TEXT,
+ADD COLUMN IF NOT EXISTS price_cents INTEGER;
+`);
+
+
+await pool.query(`
+UPDATE courtesy_invites
+SET
+  invite_type =
+    COALESCE(
+      invite_type,
+      'legacy_297'
+    ),
+
+  price_cents =
+    COALESCE(
+      price_cents,
+      29700
+    )
+
+WHERE invite_type IS NULL
+   OR price_cents IS NULL;
+`);
+
+
+await pool.query(`
+ALTER TABLE courtesy_invites
+
+ALTER COLUMN invite_type
+SET DEFAULT 'courtesy_77',
+
+ALTER COLUMN invite_type
+SET NOT NULL,
+
+ALTER COLUMN price_cents
+SET DEFAULT 7700,
+
+ALTER COLUMN price_cents
+SET NOT NULL;
+`);
+
+
+await pool.query(`
+CREATE INDEX IF NOT EXISTS
+  idx_courtesy_invites_sponsor_type
+
+ON courtesy_invites (
+  sponsor_user_id,
+  invite_type
+);
+`);
 await pool.query(`
 CREATE TABLE IF NOT EXISTS creator_invites (
   id BIGSERIAL PRIMARY KEY,
@@ -2305,54 +2358,188 @@ console.error("GET /me error:", err);
 return res.status(500).json({ ok: false, error: "Server error" });
 }
 });
-app.post("/referrals/courtesy-code", authMiddleware, async (req, res) => { 
-  try {
-    const { rows } = await pool.query(
-      `
-      SELECT refid
-      FROM users
-      WHERE id = $1
-      LIMIT 1;
-      `,
-      [req.userId]
-    );
+app.post(
+  "/referrals/courtesy-code",
+  authMiddleware,
+  async (req, res) => {
 
-    if (rows.length === 0) {
-      return res.status(404).json({
-        ok: false,
-        error: "Usuario no encontrado",
+    const client =
+      await pool.connect();
+
+
+    try {
+
+      await client.query("BEGIN");
+
+
+      // Lock member row so simultaneous clicks
+      // cannot generate more than 3 invites.
+      const userResult =
+        await client.query(
+          `
+          SELECT
+            id,
+            refid
+
+          FROM users
+
+          WHERE id = $1
+
+          LIMIT 1
+
+          FOR UPDATE;
+          `,
+          [req.userId]
+        );
+
+
+      if (
+        userResult.rows.length !== 1
+      ) {
+
+        await client.query("ROLLBACK");
+
+        return res.status(404).json({
+          ok: false,
+          error: "Usuario no encontrado",
+        });
+
+      }
+
+
+      const countResult =
+        await client.query(
+          `
+          SELECT
+            COUNT(*)::int AS total
+
+          FROM courtesy_invites
+
+          WHERE sponsor_user_id = $1
+            AND invite_type = 'courtesy_77';
+          `,
+          [req.userId]
+        );
+
+
+      const usedSlots =
+        Number(
+          countResult.rows[0]?.total || 0
+        );
+
+
+      const maxInvites = 3;
+
+
+      if (
+        usedSlots >= maxInvites
+      ) {
+
+        await client.query("ROLLBACK");
+
+
+        return res.status(409).json({
+          ok: false,
+          code: "COURTESY_LIMIT_REACHED",
+          error:
+            "You have already created your 3 courtesy invitations.",
+          used: usedSlots,
+          max: maxInvites,
+          remaining: 0,
+        });
+
+      }
+
+
+      const courtesyCode =
+        `GIFT-${crypto
+          .randomBytes(6)
+          .toString("hex")
+          .toUpperCase()}`;
+
+
+      const codeHash =
+        hashCourtesyCode(
+          courtesyCode
+        );
+
+
+      await client.query(
+        `
+        INSERT INTO courtesy_invites (
+          sponsor_user_id,
+          code_hash,
+          invite_type,
+          price_cents
+        )
+
+        VALUES (
+          $1,
+          $2,
+          'courtesy_77',
+          7700
+        );
+        `,
+        [
+          req.userId,
+          codeHash,
+        ]
+      );
+
+
+      const newUsed =
+        usedSlots + 1;
+
+
+      await client.query("COMMIT");
+
+
+      return res.json({
+        ok: true,
+
+        courtesyCode,
+
+        priceCents: 7700,
+
+        used: newUsed,
+
+        max: maxInvites,
+
+        remaining:
+          Math.max(
+            maxInvites - newUsed,
+            0
+          ),
       });
+
+
+    } catch (err) {
+
+      await client.query(
+        "ROLLBACK"
+      ).catch(() => {});
+
+
+      console.error(
+        "POST /referrals/courtesy-code error:",
+        err
+      );
+
+
+      return res.status(500).json({
+        ok: false,
+        error: "Server error",
+      });
+
+
+    } finally {
+
+      client.release();
+
     }
 
-    const courtesyCode =
-  `GIFT-${crypto.randomBytes(6).toString("hex").toUpperCase()}`;
-
-const codeHash = hashCourtesyCode(courtesyCode);
-
-await pool.query(
-  `
-  INSERT INTO courtesy_invites (
-    sponsor_user_id,
-    code_hash
-  )
-  VALUES ($1, $2);
-  `,
-  [req.userId, codeHash]
-);
-
-return res.json({
-  ok: true,
-  courtesyCode,
-}); 
-  } catch (err) {
-    console.error("GET /referrals/courtesy-code error:", err);
-
-    return res.status(500).json({
-      ok: false,
-      error: "Server error",
-    });
   }
-});
+);
 // -------------------------
 // REFERRALS: resumen real del miembro
 // -------------------------
@@ -5926,18 +6113,85 @@ app.post(
             [sponsorUserId]
           );
 
+const isCreator =
+  creatorResult.rows.length === 1;
 
-        const isCreator =
-          creatorResult.rows.length === 1;
+
+// =============================================
+// Did sponsor JOIN through Courtesy?
+// =============================================
+
+const courtesyOriginResult =
+  await client.query(
+    `
+    SELECT
+      purchase_type
+
+    FROM stripe_checkout_access
+
+    WHERE user_id = $1
+      AND signup_used = TRUE
+      AND payment_status = 'paid'
+
+    ORDER BY id ASC
+
+    LIMIT 1;
+    `,
+    [sponsorUserId]
+  );
 
 
-      let creatorUnlockCount = 6;
+const sponsorPurchaseType =
+  String(
+    courtesyOriginResult.rows[0]
+      ?.purchase_type || ""
+  )
+    .trim()
+    .toLowerCase();
+
+
+const isCourtesyMember =
+  sponsorPurchaseType ===
+    "courtesy_77" ||
+  sponsorPurchaseType ===
+    "admin_courtesy_7";
+
+
+// =============================================
+// Reward phase logic
+// =============================================
+
+let shouldCreateReward = true;
+
+
+// CREATOR:
+// #1 yes
+// #2 no
+// #3 yes
+// #4 no
+// #5 yes
+// #6 no
+// #7+ yes
+
+let creatorUnlockCount = 6;
 
 let creatorQualifiedBefore = 0;
 
 let creatorReferralNumber = null;
 
-let shouldCreateReward = true;
+
+// COURTESY:
+// #1 yes
+// #2 no
+// #3 yes
+// #4 no
+// #5+ yes
+
+const courtesyUnlockCount = 4;
+
+let courtesyQualifiedBefore = 0;
+
+let courtesyReferralNumber = null;
 
 
 if (isCreator) {
@@ -5961,22 +6215,16 @@ if (isCreator) {
   }
 
 
-  // Count PREVIOUS qualified normal referrals.
-  // Current referral is still pending,
-  // so it is not included.
-
   const progressResult =
     await client.query(
       `
       SELECT
-        COUNT(*)::int
-          AS qualified_count
+        COUNT(*)::int AS qualified_count
 
       FROM stripe_checkout_access
 
-      WHERE
-        UPPER(ref_code) =
-          UPPER($1)
+      WHERE UPPER(ref_code) =
+        UPPER($1)
 
         AND payment_status =
           'paid'
@@ -6000,8 +6248,7 @@ if (isCreator) {
 
   creatorQualifiedBefore =
     Number(
-      progressResult
-        .rows[0]
+      progressResult.rows[0]
         ?.qualified_count || 0
     );
 
@@ -6010,23 +6257,79 @@ if (isCreator) {
     creatorQualifiedBefore + 1;
 
 
-  // TMKP Creator Phase:
-  //
-  // #1  = reward
-  // #2  = no reward
-  // #3  = reward
-  // #4  = no reward
-  // #5  = reward
-  // #6  = no reward
-  // #7+ = normal reward every time
-
   if (
     creatorReferralNumber <=
     creatorUnlockCount
   ) {
 
     shouldCreateReward =
-      creatorReferralNumber % 2 === 1;
+      creatorReferralNumber %
+        2 ===
+      1;
+
+  } else {
+
+    shouldCreateReward = true;
+
+  }
+
+
+} else if (
+  isCourtesyMember
+) {
+
+  const courtesyProgressResult =
+    await client.query(
+      `
+      SELECT
+        COUNT(*)::int AS qualified_count
+
+      FROM stripe_checkout_access
+
+      WHERE UPPER(ref_code) =
+        UPPER($1)
+
+        AND payment_status =
+          'paid'
+
+        AND signup_used = TRUE
+
+        AND user_id IS NOT NULL
+
+        AND referral_status =
+          'qualified'
+
+        AND purchase_type =
+          'normal'
+
+        AND is_test_account =
+          FALSE;
+      `,
+      [referral.ref_code]
+    );
+
+
+  courtesyQualifiedBefore =
+    Number(
+      courtesyProgressResult
+        .rows[0]
+        ?.qualified_count || 0
+    );
+
+
+  courtesyReferralNumber =
+    courtesyQualifiedBefore + 1;
+
+
+  if (
+    courtesyReferralNumber <=
+    courtesyUnlockCount
+  ) {
+
+    shouldCreateReward =
+      courtesyReferralNumber %
+        2 ===
+      1;
 
   } else {
 
@@ -6035,7 +6338,7 @@ if (isCreator) {
   }
 
 }
-
+       
         // =============================================
         // Qualify referral
         // =============================================
@@ -6178,65 +6481,110 @@ if (isCreator) {
         );
 
 
-        // =============================================
-        // RESPONSE
-        // =============================================
+       // =============================================
+// RESPONSE
+// =============================================
 
-        if (
-          isCreator &&
-          !shouldCreateReward
-        ) {
+if (
+  isCreator &&
+  !shouldCreateReward
+) {
 
-          const creatorProgress =
-            creatorQualifiedBefore + 1;
-
-
-          return res.json({
-
-            ok: true,
-
-            qualified: true,
-
-            referralCheckoutId,
-
-            creator: true,
-
-            creatorUnlock: true,
-
-            creatorProgress,
-
-            creatorUnlockCount,
-
-            rewardsUnlocked:
-              creatorProgress >=
-              creatorUnlockCount,
-
-            rewardCreated: false,
-
-            rewardStatus: null,
-
-          });
-
-        }
+  const creatorProgress =
+    creatorQualifiedBefore + 1;
 
 
-        return res.json({
+  return res.json({
 
-          ok: true,
+    ok: true,
 
-          qualified: true,
+    qualified: true,
 
-          referralCheckoutId,
+    referralCheckoutId,
 
-          creator:
-            isCreator,
+    creator: true,
 
-          rewardCreated: true,
+    courtesy: false,
 
-          rewardStatus,
+    creatorUnlock: true,
 
-        });
+    creatorProgress,
 
+    creatorUnlockCount,
+
+    rewardsUnlocked:
+      creatorProgress >=
+      creatorUnlockCount,
+
+    rewardCreated: false,
+
+    rewardStatus: null,
+
+  });
+
+}
+
+
+if (
+  isCourtesyMember &&
+  !shouldCreateReward
+) {
+
+  const courtesyProgress =
+    courtesyQualifiedBefore + 1;
+
+
+  return res.json({
+
+    ok: true,
+
+    qualified: true,
+
+    referralCheckoutId,
+
+    creator: false,
+
+    courtesy: true,
+
+    courtesyPhase: true,
+
+    courtesyProgress,
+
+    courtesyUnlockCount,
+
+    rewardsUnlocked:
+      courtesyProgress >=
+      courtesyUnlockCount,
+
+    rewardCreated: false,
+
+    rewardStatus: null,
+
+  });
+
+}
+
+
+return res.json({
+
+  ok: true,
+
+  qualified: true,
+
+  referralCheckoutId,
+
+  creator:
+    isCreator,
+
+  courtesy:
+    isCourtesyMember,
+
+  rewardCreated:
+    shouldCreateReward,
+
+  rewardStatus,
+
+});
 
       } catch (err) {
 
