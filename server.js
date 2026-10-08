@@ -7174,7 +7174,10 @@ WHERE payment_status = 'paid'
   AND is_test_account = FALSE
   AND (
     amount_total >= 49500
-    OR purchase_type = 'courtesy'
+    OR purchase_type IN (
+  'courtesy',
+  'legacy_297'
+) 
   );
 `);
   const total = rows[0]?.total || 0;
@@ -7205,7 +7208,10 @@ const { rows } = await pool.query(`
   AND is_test_account = FALSE
   AND (
     amount_total >= 49500
-    OR purchase_type = 'courtesy'
+    OR purchase_type IN (
+  'courtesy',
+  'legacy_297'
+) 
   ); 
 `); 
 const lastHour = rows[0]?.last_hour || 0;
@@ -7221,7 +7227,10 @@ const oldest = await pool.query(`
     AND is_test_account = FALSE
     AND (
       amount_total >= 49500
-      OR purchase_type = 'courtesy'
+      OR purchase_type IN (
+  'courtesy',
+  'legacy_297'
+) 
     )
   ORDER BY paid_at ASC
   LIMIT 1;
