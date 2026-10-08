@@ -275,7 +275,7 @@ CREATE TABLE IF NOT EXISTS creator_profiles (
 
   pass_cents INTEGER NOT NULL DEFAULT 700,
 
-  reward_unlock_count INTEGER NOT NULL DEFAULT 3,
+  reward_unlock_count INTEGER NOT NULL DEFAULT 6,
 
   creator_status TEXT NOT NULL DEFAULT 'active',
 
@@ -288,6 +288,19 @@ CREATE TABLE IF NOT EXISTS creator_profiles (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `); 
+ await pool.query(`
+ALTER TABLE creator_profiles
+ALTER COLUMN reward_unlock_count
+SET DEFAULT 6;
+`);
+
+await pool.query(`
+UPDATE creator_profiles
+SET
+  reward_unlock_count = 6,
+  updated_at = NOW()
+WHERE reward_unlock_count = 3;
+`);
  await pool.query(`
 ALTER TABLE creator_profiles
 
@@ -2003,7 +2016,7 @@ if (checkout.purchase_type === "creator") {
       $6,
       $7,
       $8,
-      3,
+      6,
       'active',
       'pending',
       NOW(),
@@ -4502,7 +4515,7 @@ app.get(
 
               const unlockCount =
                 Number(
-                  row.reward_unlock_count || 3
+                  row.reward_unlock_count || 6
                 );
 
 
@@ -5918,91 +5931,110 @@ app.post(
           creatorResult.rows.length === 1;
 
 
-        let creatorUnlockCount = 3;
+      let creatorUnlockCount = 6;
 
-        let creatorQualifiedBefore = 0;
+let creatorQualifiedBefore = 0;
 
-        let shouldCreateReward = true;
+let creatorReferralNumber = null;
 
-
-        if (isCreator) {
-
-          creatorUnlockCount =
-            Number(
-              creatorResult.rows[0]
-                .reward_unlock_count
-            );
+let shouldCreateReward = true;
 
 
-          if (
-            !Number.isInteger(
-              creatorUnlockCount
-            ) ||
-            creatorUnlockCount < 1
-          ) {
+if (isCreator) {
 
-            creatorUnlockCount = 3;
-
-          }
+  creatorUnlockCount =
+    Number(
+      creatorResult.rows[0]
+        .reward_unlock_count
+    );
 
 
-          // Count PREVIOUS qualified referrals.
-          // The current referral is still pending,
-          // so it is not included.
+  if (
+    !Number.isInteger(
+      creatorUnlockCount
+    ) ||
+    creatorUnlockCount < 1
+  ) {
 
-          const progressResult =
-            await client.query(
-              `
-              SELECT
-                COUNT(*)::int
-                  AS qualified_count
+    creatorUnlockCount = 6;
 
-              FROM stripe_checkout_access
-
-              WHERE
-                UPPER(ref_code) =
-                  UPPER($1)
-
-                AND payment_status =
-                  'paid'
-
-                AND signup_used = TRUE
-
-                AND user_id IS NOT NULL
-
-                AND referral_status =
-                  'qualified'
-
-                AND purchase_type =
-                  'normal'
-
-                AND is_test_account =
-                  FALSE;
-              `,
-              [referral.ref_code]
-            );
+  }
 
 
-          creatorQualifiedBefore =
-            Number(
-              progressResult
-                .rows[0]
-                ?.qualified_count || 0
-            );
+  // Count PREVIOUS qualified normal referrals.
+  // Current referral is still pending,
+  // so it is not included.
+
+  const progressResult =
+    await client.query(
+      `
+      SELECT
+        COUNT(*)::int
+          AS qualified_count
+
+      FROM stripe_checkout_access
+
+      WHERE
+        UPPER(ref_code) =
+          UPPER($1)
+
+        AND payment_status =
+          'paid'
+
+        AND signup_used = TRUE
+
+        AND user_id IS NOT NULL
+
+        AND referral_status =
+          'qualified'
+
+        AND purchase_type =
+          'normal'
+
+        AND is_test_account =
+          FALSE;
+      `,
+      [referral.ref_code]
+    );
 
 
-          // Referrals #1–#3:
-          // qualify, but no reward.
-          //
-          // Referral #4+:
-          // normal TMKP reward.
+  creatorQualifiedBefore =
+    Number(
+      progressResult
+        .rows[0]
+        ?.qualified_count || 0
+    );
 
-          shouldCreateReward =
-            creatorQualifiedBefore >=
-            creatorUnlockCount;
 
-        }
+  creatorReferralNumber =
+    creatorQualifiedBefore + 1;
 
+
+  // TMKP Creator Phase:
+  //
+  // #1  = reward
+  // #2  = no reward
+  // #3  = reward
+  // #4  = no reward
+  // #5  = reward
+  // #6  = no reward
+  // #7+ = normal reward every time
+
+  if (
+    creatorReferralNumber <=
+    creatorUnlockCount
+  ) {
+
+    shouldCreateReward =
+      creatorReferralNumber % 2 === 1;
+
+  } else {
+
+    shouldCreateReward = true;
+
+  }
+
+}
 
         // =============================================
         // Qualify referral
