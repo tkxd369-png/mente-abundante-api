@@ -238,11 +238,61 @@ chargeId: charge.id,
             [sponsorUserId]
           );
 
+const isCreator =
+  creatorResult.rows.length === 1;
 
-        const isCreator =
-          creatorResult.rows.length === 1;
+
+// ==================================================
+// Did the sponsor JOIN TMKP through Courtesy?
+// ==================================================
+
+const courtesyOriginResult =
+  await client.query(
+    `
+    SELECT
+      purchase_type
+
+    FROM stripe_checkout_access
+
+    WHERE user_id = $1
+      AND signup_used = TRUE
+      AND payment_status = 'paid'
+
+    LIMIT 1;
+    `,
+    [sponsorUserId]
+  );
+
+
+const sponsorPurchaseType =
+  String(
+    courtesyOriginResult.rows[0]
+      ?.purchase_type || ""
+  ).toLowerCase();
+
+
+const isCourtesyMember =
+  sponsorPurchaseType === "courtesy_77" ||
+  sponsorPurchaseType === "admin_courtesy_7";
+
+
+// ==================================================
+// Reward phase logic
+// ==================================================
 
 let shouldCreateReward = true;
+
+
+// --------------------------------------------------
+// CREATOR PHASE
+// #1 reward
+// #2 no reward
+// #3 reward
+// #4 no reward
+// #5 reward
+// #6 no reward
+// #7+ reward always
+// --------------------------------------------------
 
 let creatorQualifiedBefore = 0;
 
@@ -271,10 +321,6 @@ if (isCreator) {
 
   }
 
-
-  // Count PREVIOUS qualified normal referrals.
-  // The current referral is still pending,
-  // so it is not included yet.
 
   const creatorProgressResult =
     await client.query(
@@ -314,18 +360,6 @@ if (isCreator) {
     creatorQualifiedBefore + 1;
 
 
-  // ================================================
-  // TMKP CREATOR PHASE
-  //
-  // Referral #1  -> reward
-  // Referral #2  -> no reward
-  // Referral #3  -> reward
-  // Referral #4  -> no reward
-  // Referral #5  -> reward
-  // Referral #6  -> no reward
-  // Referral #7+ -> reward every time
-  // ================================================
-
   if (
     creatorReferralNumber <=
     creatorUnlockCount
@@ -340,8 +374,75 @@ if (isCreator) {
 
   }
 
+
+// --------------------------------------------------
+// COURTESY PHASE
+// #1 reward
+// #2 no reward
+// #3 reward
+// #4 no reward
+// #5+ reward always
+// --------------------------------------------------
+
+} else if (isCourtesyMember) {
+
+  const courtesyUnlockCount = 4;
+
+
+  const courtesyProgressResult =
+    await client.query(
+      `
+      SELECT
+        COUNT(*)::int AS qualified_count
+
+      FROM stripe_checkout_access
+
+      WHERE UPPER(ref_code) = UPPER($1)
+
+        AND payment_status = 'paid'
+
+        AND signup_used = TRUE
+
+        AND user_id IS NOT NULL
+
+        AND referral_status = 'qualified'
+
+        AND purchase_type = 'normal'
+
+        AND is_test_account = FALSE;
+      `,
+      [row.ref_code]
+    );
+
+
+  const courtesyQualifiedBefore =
+    Number(
+      courtesyProgressResult
+        .rows[0]
+        ?.qualified_count || 0
+    );
+
+
+  const courtesyReferralNumber =
+    courtesyQualifiedBefore + 1;
+
+
+  if (
+    courtesyReferralNumber <=
+    courtesyUnlockCount
+  ) {
+
+    shouldCreateReward =
+      courtesyReferralNumber % 2 === 1;
+
+  } else {
+
+    shouldCreateReward = true;
+
+  }
+
 }
-        
+ 
         // ==================================================
         // Qualify referral
         // ==================================================
