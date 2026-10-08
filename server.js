@@ -4329,6 +4329,277 @@ app.get(
 
   }
 );
+// =========================================================
+// ADMIN: TMKP CREATOR COLLAB - LIST CREATORS
+// =========================================================
+
+app.get(
+  "/admin/creators",
+  adminAuthMiddleware,
+  async (req, res) => {
+
+    try {
+
+      const { rows } =
+        await pool.query(
+          `
+          SELECT
+
+            cp.user_id,
+            cp.creator_invite_id,
+            cp.tier,
+            cp.follower_count,
+            cp.platform,
+            cp.handle,
+            cp.creator_fee_cents,
+            cp.pass_cents,
+            cp.reward_unlock_count,
+            cp.creator_status,
+            cp.first_collab_status,
+            cp.first_collab_paid_at,
+            cp.created_at,
+
+            u.full_name,
+            u.email,
+            u.refid,
+            u.country,
+            u.stripe_connect_account_id,
+
+            ci.collab_payout_cents,
+            ci.status AS invite_status,
+
+            (
+              SELECT COUNT(*)::int
+              FROM stripe_checkout_access sca
+
+              WHERE
+                UPPER(sca.ref_code) =
+                  UPPER(u.refid)
+
+                AND sca.payment_status =
+                  'paid'
+
+                AND sca.signup_used = TRUE
+
+                AND sca.user_id IS NOT NULL
+
+                AND sca.referral_status =
+                  'qualified'
+
+                AND sca.purchase_type =
+                  'normal'
+
+                AND sca.is_test_account =
+                  FALSE
+            ) AS qualified_referrals
+
+          FROM creator_profiles cp
+
+          JOIN users u
+            ON u.id = cp.user_id
+
+          LEFT JOIN creator_invites ci
+            ON ci.id =
+              cp.creator_invite_id
+
+          ORDER BY cp.created_at DESC;
+          `
+        );
+
+
+      const creators =
+        await Promise.all(
+
+          rows.map(
+            async (row) => {
+
+              const accountId =
+                String(
+                  row.stripe_connect_account_id ||
+                  ""
+                ).trim();
+
+
+              let connectStatus =
+                "not_connected";
+
+
+              let payoutsReady =
+                false;
+
+
+              if (
+                accountId &&
+                stripe
+              ) {
+
+                try {
+
+                  const account =
+                    await stripe.accounts.retrieve(
+                      accountId
+                    );
+
+
+                  payoutsReady =
+                    account.details_submitted === true &&
+                    account.payouts_enabled === true &&
+                    account.capabilities?.transfers ===
+                      "active";
+
+
+                  connectStatus =
+                    payoutsReady
+                      ? "ready"
+                      : "pending";
+
+
+                } catch (err) {
+
+                  console.error(
+                    `Creator Stripe status error for user ${row.user_id}:`,
+                    err.message
+                  );
+
+
+                  connectStatus =
+                    "error";
+
+                }
+
+              }
+
+
+              const qualifiedReferrals =
+                Number(
+                  row.qualified_referrals || 0
+                );
+
+
+              const unlockCount =
+                Number(
+                  row.reward_unlock_count || 3
+                );
+
+
+              return {
+
+                userId:
+                  row.user_id,
+
+                creatorInviteId:
+                  row.creator_invite_id,
+
+                fullName:
+                  row.full_name,
+
+                email:
+                  row.email,
+
+                refid:
+                  row.refid,
+
+                country:
+                  row.country,
+
+                tier:
+                  row.tier,
+
+                followerCount:
+                  Number(
+                    row.follower_count || 0
+                  ),
+
+                platform:
+                  row.platform,
+
+                handle:
+                  row.handle,
+
+                creatorFee:
+                  Number(
+                    row.creator_fee_cents || 0
+                  ) / 100,
+
+                creatorPass:
+                  Number(
+                    row.pass_cents || 0
+                  ) / 100,
+
+                collabPayout:
+                  Number(
+                    row.collab_payout_cents || 0
+                  ) / 100,
+
+                creatorStatus:
+                  row.creator_status,
+
+                collabStatus:
+                  row.first_collab_status,
+
+                collabPaidAt:
+                  row.first_collab_paid_at,
+
+                inviteStatus:
+                  row.invite_status,
+
+                qualifiedReferrals,
+
+                rewardUnlockCount:
+                  unlockCount,
+
+                rewardsUnlocked:
+                  qualifiedReferrals >=
+                  unlockCount,
+
+                connectStatus,
+
+                payoutsReady,
+
+                createdAt:
+                  row.created_at,
+
+              };
+
+            }
+          )
+
+        );
+
+
+      return res.json({
+
+        ok: true,
+
+        total:
+          creators.length,
+
+        creators,
+
+      });
+
+
+    } catch (err) {
+
+      console.error(
+        "GET /admin/creators error:",
+        err
+      );
+
+
+      return res.status(500).json({
+
+        ok: false,
+
+        error:
+          "Could not load Creator Collab accounts.",
+
+      });
+
+    }
+
+  }
+);
 // -------------------------
 // ADMIN: stats
 // -------------------------
