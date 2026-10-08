@@ -1897,6 +1897,138 @@ normalizedCountry || null,
 ];
 const { rows } = await client.query(insertQuery, insertValues);
 const newUser = rows[0];
+
+ // =========================================================
+// CREATOR COLLAB:
+// Convert a paid Creator Pass into a real Creator profile
+// =========================================================
+
+if (checkout.purchase_type === "creator") {
+
+  const creatorInviteResult =
+    await client.query(
+      `
+      SELECT
+        id,
+        tier,
+        follower_count,
+        platform,
+        handle,
+        creator_fee_cents,
+        pass_cents,
+        collab_payout_cents,
+        status,
+        activated_user_id
+      FROM creator_invites
+      WHERE stripe_session_id = $1
+      LIMIT 1
+      FOR UPDATE;
+      `,
+      [String(sessionId).trim()]
+    );
+
+
+  if (creatorInviteResult.rows.length !== 1) {
+
+    throw new Error(
+      "Creator invite was not found for this paid checkout."
+    );
+
+  }
+
+
+  const creatorInvite =
+    creatorInviteResult.rows[0];
+
+
+  if (
+    creatorInvite.status !== "paid" ||
+    creatorInvite.activated_user_id
+  ) {
+
+    throw new Error(
+      "Creator invite is not available for account activation."
+    );
+
+  }
+
+
+  await client.query(
+    `
+    INSERT INTO creator_profiles (
+      user_id,
+      creator_invite_id,
+      tier,
+      follower_count,
+      platform,
+      handle,
+      creator_fee_cents,
+      pass_cents,
+      reward_unlock_count,
+      creator_status,
+      first_collab_status,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      $1,
+      $2,
+      $3,
+      $4,
+      $5,
+      $6,
+      $7,
+      $8,
+      3,
+      'active',
+      'pending',
+      NOW(),
+      NOW()
+    );
+    `,
+    [
+      newUser.id,
+      creatorInvite.id,
+      creatorInvite.tier,
+      creatorInvite.follower_count,
+      creatorInvite.platform,
+      creatorInvite.handle,
+      creatorInvite.creator_fee_cents,
+      creatorInvite.pass_cents,
+    ]
+  );
+
+
+  const creatorActivateResult =
+    await client.query(
+      `
+      UPDATE creator_invites
+      SET
+        status = 'activated',
+        activated_user_id = $2,
+        updated_at = NOW()
+      WHERE id = $1
+        AND status = 'paid'
+        AND activated_user_id IS NULL;
+      `,
+      [
+        creatorInvite.id,
+        newUser.id,
+      ]
+    );
+
+
+  if (
+    creatorActivateResult.rowCount !== 1
+  ) {
+
+    throw new Error(
+      "Creator invite could not be activated."
+    );
+
+  }
+
+}
 // Crédito al patrocinador dentro de la misma transacción.
 // Guardamos el estado actualizado para detectar únicamente el PRIMER referido.
 let sponsorAfterReferral = null;
