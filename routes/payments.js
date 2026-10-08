@@ -69,7 +69,10 @@ async function getCurrentCheckoutPhase() {
       AND is_test_account = FALSE
       AND (
         amount_total >= 49500
-        OR purchase_type = 'courtesy'
+        OR purchase_type IN (
+  'courtesy',
+  'legacy_297'
+) 
       );
   `);
 
