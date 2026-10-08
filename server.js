@@ -4015,6 +4015,150 @@ console.error("POST /admin/login error:", err);
 return res.status(500).json({ ok: false, error: "Server error" });
 }
 });
+// =========================================================
+// ADMIN: CREATE PERSONAL $7 COURTESY INVITE
+// Admin only
+// =========================================================
+
+app.post(
+  "/admin/courtesy-7",
+  adminAuthMiddleware,
+  async (req, res) => {
+
+    try {
+
+      const adminResult =
+        await pool.query(
+          `
+          SELECT
+            id,
+            refid,
+            full_name
+
+          FROM users
+
+          WHERE id = $1
+            AND is_admin = TRUE
+
+          LIMIT 1;
+          `,
+          [req.adminId]
+        );
+
+
+      if (
+        adminResult.rows.length !== 1
+      ) {
+
+        return res.status(404).json({
+          ok: false,
+          error:
+            "Admin account not found.",
+        });
+
+      }
+
+
+      const admin =
+        adminResult.rows[0];
+
+
+      const refCode =
+        String(
+          admin.refid || ""
+        )
+          .trim()
+          .toUpperCase();
+
+
+      if (!refCode) {
+
+        return res.status(409).json({
+          ok: false,
+          code:
+            "ADMIN_REF_CODE_MISSING",
+          error:
+            "Admin account does not have a referral code.",
+        });
+
+      }
+
+
+      const courtesyCode =
+        `GIFT-${crypto
+          .randomBytes(6)
+          .toString("hex")
+          .toUpperCase()}`;
+
+
+      const codeHash =
+        hashCourtesyCode(
+          courtesyCode
+        );
+
+
+      await pool.query(
+        `
+        INSERT INTO courtesy_invites (
+          sponsor_user_id,
+          code_hash,
+          invite_type,
+          price_cents
+        )
+
+        VALUES (
+          $1,
+          $2,
+          'admin_courtesy_7',
+          700
+        );
+        `,
+        [
+          req.adminId,
+          codeHash,
+        ]
+      );
+
+
+      return res.json({
+
+        ok: true,
+
+        courtesyCode,
+
+        inviteType:
+          "admin_courtesy_7",
+
+        priceCents: 700,
+
+        price: 7,
+
+        refCode,
+
+        adminName:
+          admin.full_name || null,
+
+      });
+
+
+    } catch (err) {
+
+      console.error(
+        "POST /admin/courtesy-7 error:",
+        err
+      );
+
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "Could not create Admin Courtesy invitation.",
+      });
+
+    }
+
+  }
+);
  // =========================================================
 // ADMIN: CREATE TMKP CREATOR COLLAB INVITE
 // =========================================================
