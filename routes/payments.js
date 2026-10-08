@@ -175,6 +175,36 @@ CREATE TABLE IF NOT EXISTS courtesy_invites (
 );
 `);
  await pool.query(`
+ALTER TABLE courtesy_invites
+
+ADD COLUMN IF NOT EXISTS
+  invite_type TEXT,
+
+ADD COLUMN IF NOT EXISTS
+  price_cents INTEGER;
+`);
+
+
+await pool.query(`
+UPDATE courtesy_invites
+
+SET
+  invite_type =
+    COALESCE(
+      invite_type,
+      'legacy_297'
+    ),
+
+  price_cents =
+    COALESCE(
+      price_cents,
+      29700
+    )
+
+WHERE invite_type IS NULL
+   OR price_cents IS NULL;
+`);
+ await pool.query(`
 ALTER TABLE stripe_checkout_access
 ADD COLUMN IF NOT EXISTS referral_status TEXT NOT NULL DEFAULT 'none',
 ADD COLUMN IF NOT EXISTS referral_review_after TIMESTAMPTZ,
@@ -283,9 +313,11 @@ async function findAvailableCourtesyInvite(code, refCode) {
 
   const { rows } = await pool.query(
     `
-    SELECT
-      ci.id,
-      ci.sponsor_user_id
+   SELECT
+  ci.id,
+  ci.sponsor_user_id,
+  ci.invite_type,
+  ci.price_cents
     FROM courtesy_invites ci
     JOIN users s
       ON s.id = ci.sponsor_user_id
@@ -1510,38 +1542,148 @@ const lang = normalizeLang(req.body?.lang);
 
  const testCode = clean(req.body?.testCode, 200);
 
-const isTestAccount =
-  testCode !== "" && isValidInternalTestCode(testCode);
- const courtesyInvite =
-  testCode !== "" && !isTestAccount
-    ? await findAvailableCourtesyInvite(testCode, refCode)
+ const isTestAccount =
+  testCode !== "" &&
+  isValidInternalTestCode(
+    testCode
+  );
+
+
+const courtesyInvite =
+  testCode !== "" &&
+  !isTestAccount
+
+    ? await findAvailableCourtesyInvite(
+        testCode,
+        refCode
+      )
+
     : null;
 
-const isCourtesy = !!courtesyInvite;
- if (testCode && !isTestAccount && !isCourtesy) {
+
+const isCourtesy =
+  !!courtesyInvite;
+
+
+if (
+  testCode &&
+  !isTestAccount &&
+  !isCourtesy
+) {
+
   return res.status(400).json({
     ok: false,
-    code: "INVALID_SPECIAL_CODE", 
+
+    code:
+      "INVALID_SPECIAL_CODE",
+
     error:
       lang === "en"
         ? "Invalid special code."
-        : "Código especial inválido." 
+        : "Código especial inválido.",
   });
+
 }
-if (isTestAccount && !STRIPE_INTERNAL_TEST_COUPON_ID) {
+
+
+// -----------------------------------------
+// Courtesy type + exact approved price
+// -----------------------------------------
+
+const courtesyPurchaseType =
+  isCourtesy
+
+    ? clean(
+        courtesyInvite.invite_type,
+        30
+      ).toLowerCase()
+
+    : "";
+
+
+const courtesyPriceCents =
+  isCourtesy
+
+    ? Number(
+        courtesyInvite.price_cents
+      )
+
+    : null;
+
+
+const allowedCourtesyPrices = {
+
+  courtesy_77: 7700,
+
+  admin_courtesy_7: 700,
+
+  legacy_297: 29700,
+
+};
+
+
+if (
+  isCourtesy &&
+  (
+    !Object.prototype.hasOwnProperty.call(
+      allowedCourtesyPrices,
+      courtesyPurchaseType
+    ) ||
+
+    allowedCourtesyPrices[
+      courtesyPurchaseType
+    ] !== courtesyPriceCents
+  )
+) {
+
+  return res.status(500).json({
+    ok: false,
+
+    code:
+      "INVALID_COURTESY_CONFIGURATION",
+
+    error:
+      "Courtesy invitation is not configured correctly.",
+  });
+
+}
+
+
+if (
+  isTestAccount &&
+  !STRIPE_INTERNAL_TEST_COUPON_ID
+) {
+
   return res.status(503).json({
     ok: false,
-    code: "TEST_MODE_NOT_CONFIGURED",
+
+    code:
+      "TEST_MODE_NOT_CONFIGURED",
+
     error:
       lang === "en"
         ? "Internal test mode is not configured."
-        : "El modo interno de prueba no está configurado."
+        : "El modo interno de prueba no está configurado.",
   });
-} 
-const { purchaseType, rewardEligible } = getPurchaseFlags({
-  isTestAccount,
-  isCourtesy 
-}); 
+
+}
+
+
+const purchaseFlags =
+  getPurchaseFlags({
+    isTestAccount,
+    isCourtesy,
+  });
+
+
+const purchaseType =
+  isCourtesy
+    ? courtesyPurchaseType
+    : purchaseFlags.purchaseType;
+
+
+const rewardEligible =
+  purchaseFlags.rewardEligible;
 if (!fullName || !email || !phone || !country || !refCode) {
 return res.status(400).json({
 error:
@@ -1619,11 +1761,14 @@ redirectUrl:
   `${SITE_URL}/payment-confirmed.html?lang=${lang}`, 
 });
 }
-const { phase: currentPhase } =
-  await getCurrentCheckoutPhase(); 
- const checkoutPriceCents = isCourtesy
-  ? currentPhase.priceCents - currentPhase.rewardGrossCents
-  : currentPhase.priceCents;
+ const { phase: currentPhase } =
+  await getCurrentCheckoutPhase();
+
+
+const checkoutPriceCents =
+  isCourtesy
+    ? courtesyPriceCents
+    : currentPhase.priceCents;
  const checkoutDiscounts = isTestAccount
   ? [{ coupon: STRIPE_INTERNAL_TEST_COUPON_ID }]
   : isCourtesy
@@ -1671,14 +1816,44 @@ phone,
 country,
 refCode,
 lang,
- isTestAccount: isTestAccount ? "true" : "false",
+isTestAccount:
+  isTestAccount ? "true" : "false",
+
 purchaseType,
-rewardEligible: rewardEligible ? "true" : "false",
- pricingPhase: String(currentPhase.phase),
-phasePriceCents: String(currentPhase.priceCents),
- checkoutPriceCents: String(checkoutPriceCents),
-rewardGrossCents: String(currentPhase.rewardGrossCents),
-rewardCents: String(currentPhase.rewardCents),
+
+rewardEligible:
+  rewardEligible ? "true" : "false",
+
+pricingPhase:
+  String(
+    isCourtesy
+      ? 0
+      : currentPhase.phase
+  ),
+
+phasePriceCents:
+  String(
+    isCourtesy
+      ? checkoutPriceCents
+      : currentPhase.priceCents
+  ),
+
+checkoutPriceCents:
+  String(checkoutPriceCents),
+
+rewardGrossCents:
+  String(
+    isCourtesy
+      ? 0
+      : currentPhase.rewardGrossCents
+  ),
+
+rewardCents:
+  String(
+    isCourtesy
+      ? 0
+      : currentPhase.rewardCents
+  ), 
 source: "tmkp_membership",
 },
 payment_intent_data: {
