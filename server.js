@@ -2588,9 +2588,14 @@ app.get("/referrals/summary", authMiddleware, async (req, res) => {
       WHERE referral_status = 'qualified'
     )::int AS qualified,
 
-    COUNT(*) FILTER (
-      WHERE purchase_type = 'courtesy'
-    )::int AS courtesy
+     COUNT(*) FILTER (
+  WHERE purchase_type IN (
+    'courtesy',
+    'legacy_297',
+    'courtesy_77',
+    'admin_courtesy_7'
+  )
+)::int AS courtesy
 
   FROM stripe_checkout_access
   WHERE UPPER(ref_code) = $1
@@ -2622,13 +2627,45 @@ const rewardsResult = await pool.query(
 );
 
 const rewards = rewardsResult.rows[0] || {};
-   
+  const courtesySlotsResult =
+  await pool.query(
+    `
+    SELECT
+      COUNT(*)::int AS used
+
+    FROM courtesy_invites
+
+    WHERE sponsor_user_id = $1
+      AND invite_type = 'courtesy_77';
+    `,
+    [req.userId]
+  );
+
+
+const courtesyInvitesUsed =
+  Number(
+    courtesySlotsResult.rows[0]?.used || 0
+  );
+
+
+const courtesyInvitesMax = 3;
+
+
+const courtesyInvitesRemaining =
+  Math.max(
+    courtesyInvitesMax -
+      courtesyInvitesUsed,
+    0
+  ); 
  return res.json({
   ok: true,
   total: Number(summary.total || 0),
   pending: Number(summary.pending || 0),
   qualified: Number(summary.qualified || 0),
   courtesy: Number(summary.courtesy || 0),
+  courtesyInvitesUsed,
+courtesyInvitesMax,
+courtesyInvitesRemaining,
   pendingRewardCents: Number(rewards.pending_reward_cents || 0),
   transferredRewardCents: Number(rewards.transferred_reward_cents || 0),
 });
@@ -2698,9 +2735,15 @@ app.get("/referrals/activity", authMiddleware, async (req, res) => {
     AND c.user_id IS NOT NULL
     AND c.is_test_account = FALSE
     AND (
-      c.referral_status IN ('pending', 'qualified')
-      OR c.purchase_type = 'courtesy'
-    )
+  c.referral_status IN ('pending', 'qualified')
+
+  OR c.purchase_type IN (
+    'courtesy',
+    'legacy_297',
+    'courtesy_77',
+    'admin_courtesy_7'
+  )
+)
 
   ORDER BY COALESCE(c.signup_used_at, c.created_at) DESC
   LIMIT 100;
