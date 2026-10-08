@@ -246,7 +246,7 @@ const isCreator =
 // Did the sponsor JOIN TMKP through Courtesy?
 // ==================================================
 
-const courtesyOriginResult =
+ const courtesyOriginResult =
   await client.query(
     `
     SELECT
@@ -258,11 +258,13 @@ const courtesyOriginResult =
       AND signup_used = TRUE
       AND payment_status = 'paid'
 
+    ORDER BY id ASC
+
     LIMIT 1;
     `,
     [sponsorUserId]
   );
-
+  
 
 const sponsorPurchaseType =
   String(
