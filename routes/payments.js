@@ -634,6 +634,8 @@ WHERE stripe_session_id = $1;
 );
 console.log(`[payments/email] Continuation email sent for ${sessionId}.`);
 }
+async function upsertCheckoutRecord(session, fallback = {}) {
+  if (!pool) throw new Error("Database is not configured.");
  const metadata = session.metadata || {};
 
 const metadataPurchaseType =
