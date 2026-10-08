@@ -2358,8 +2358,121 @@ console.error("GET /me error:", err);
 return res.status(500).json({ ok: false, error: "Server error" });
 }
 });
+
+// =========================================================
+// MEMBER: $297 NO-REWARD INVITATION
+// Unlimited - existing member benefit
+// =========================================================
+
 app.post(
   "/referrals/courtesy-code",
+  authMiddleware,
+  async (req, res) => {
+
+    try {
+
+      const userResult =
+        await pool.query(
+          `
+          SELECT
+            id,
+            refid
+
+          FROM users
+
+          WHERE id = $1
+
+          LIMIT 1;
+          `,
+          [req.userId]
+        );
+
+
+      if (
+        userResult.rows.length !== 1
+      ) {
+
+        return res.status(404).json({
+          ok: false,
+          error:
+            "Usuario no encontrado",
+        });
+
+      }
+
+
+      const courtesyCode =
+        `GIFT-${crypto
+          .randomBytes(6)
+          .toString("hex")
+          .toUpperCase()}`;
+
+
+      const codeHash =
+        hashCourtesyCode(
+          courtesyCode
+        );
+
+
+      await pool.query(
+        `
+        INSERT INTO courtesy_invites (
+          sponsor_user_id,
+          code_hash,
+          invite_type,
+          price_cents
+        )
+
+        VALUES (
+          $1,
+          $2,
+          'legacy_297',
+          29700
+        );
+        `,
+        [
+          req.userId,
+          codeHash,
+        ]
+      );
+
+
+      return res.json({
+        ok: true,
+
+        courtesyCode,
+
+        inviteType:
+          "legacy_297",
+
+        priceCents: 29700,
+
+        price: 297,
+
+      });
+
+
+    } catch (err) {
+
+      console.error(
+        "POST /referrals/courtesy-code error:",
+        err
+      );
+
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "Could not create $297 no-reward invitation.",
+      });
+
+    }
+
+  }
+);
+
+app.post(
+"/referrals/courtesy-77", 
   authMiddleware,
   async (req, res) => {
 
@@ -2521,9 +2634,9 @@ app.post(
 
 
       console.error(
-        "POST /referrals/courtesy-code error:",
-        err
-      );
+  "POST /referrals/courtesy-77 error:",
+  err
+);
 
 
       return res.status(500).json({
