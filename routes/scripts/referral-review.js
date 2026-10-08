@@ -242,75 +242,106 @@ chargeId: charge.id,
         const isCreator =
           creatorResult.rows.length === 1;
 
+let shouldCreateReward = true;
 
-        let shouldCreateReward = true;
+let creatorQualifiedBefore = 0;
 
-        let creatorQualifiedBefore = 0;
+let creatorReferralNumber = null;
 
-        let creatorUnlockCount = 3;
-
-
-        if (isCreator) {
-
-          creatorUnlockCount =
-            Number(
-              creatorResult.rows[0]
-                .reward_unlock_count
-            );
+let creatorUnlockCount = 6;
 
 
-          if (
-            !Number.isInteger(
-              creatorUnlockCount
-            ) ||
-            creatorUnlockCount < 1
-          ) {
+if (isCreator) {
 
-            creatorUnlockCount = 3;
-
-          }
+  creatorUnlockCount =
+    Number(
+      creatorResult.rows[0]
+        .reward_unlock_count
+    );
 
 
-          // Count PREVIOUS qualified normal referrals.
-          // Current referral is still pending here,
-          // so it is not included yet.
+  if (
+    !Number.isInteger(
+      creatorUnlockCount
+    ) ||
+    creatorUnlockCount < 1
+  ) {
 
-          const creatorProgressResult =
-            await client.query(
-              `
-              SELECT
-                COUNT(*)::int AS qualified_count
-              FROM stripe_checkout_access
-              WHERE UPPER(ref_code) = UPPER($1)
-                AND payment_status = 'paid'
-                AND signup_used = TRUE
-                AND user_id IS NOT NULL
-                AND referral_status = 'qualified'
-                AND purchase_type = 'normal'
-                AND is_test_account = FALSE;
-              `,
-              [row.ref_code]
-            );
+    creatorUnlockCount = 6;
+
+  }
 
 
-          creatorQualifiedBefore =
-            Number(
-              creatorProgressResult
-                .rows[0]
-                ?.qualified_count || 0
-            );
+  // Count PREVIOUS qualified normal referrals.
+  // The current referral is still pending,
+  // so it is not included yet.
+
+  const creatorProgressResult =
+    await client.query(
+      `
+      SELECT
+        COUNT(*)::int AS qualified_count
+
+      FROM stripe_checkout_access
+
+      WHERE UPPER(ref_code) = UPPER($1)
+
+        AND payment_status = 'paid'
+
+        AND signup_used = TRUE
+
+        AND user_id IS NOT NULL
+
+        AND referral_status = 'qualified'
+
+        AND purchase_type = 'normal'
+
+        AND is_test_account = FALSE;
+      `,
+      [row.ref_code]
+    );
 
 
-          // First 3 qualified referrals unlock rewards.
-          // Referral #4 and later create rewards.
-
-          shouldCreateReward =
-            creatorQualifiedBefore >=
-            creatorUnlockCount;
-
-        }
+  creatorQualifiedBefore =
+    Number(
+      creatorProgressResult
+        .rows[0]
+        ?.qualified_count || 0
+    );
 
 
+  creatorReferralNumber =
+    creatorQualifiedBefore + 1;
+
+
+  // ================================================
+  // TMKP CREATOR PHASE
+  //
+  // Referral #1  -> reward
+  // Referral #2  -> no reward
+  // Referral #3  -> reward
+  // Referral #4  -> no reward
+  // Referral #5  -> reward
+  // Referral #6  -> no reward
+  // Referral #7+ -> reward every time
+  // ================================================
+
+  if (
+    creatorReferralNumber <=
+    creatorUnlockCount
+  ) {
+
+    shouldCreateReward =
+      creatorReferralNumber % 2 === 1;
+
+  } else {
+
+    shouldCreateReward = true;
+
+  }
+
+}
+        
         // ==================================================
         // Qualify referral
         // ==================================================
