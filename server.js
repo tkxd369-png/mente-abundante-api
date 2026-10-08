@@ -289,6 +289,30 @@ CREATE TABLE IF NOT EXISTS creator_profiles (
 );
 `); 
  await pool.query(`
+ALTER TABLE creator_profiles
+
+ADD COLUMN IF NOT EXISTS
+  first_collab_completed_at
+  TIMESTAMPTZ,
+
+ADD COLUMN IF NOT EXISTS
+  first_collab_transfer_id
+  TEXT;
+`);
+
+
+await pool.query(`
+CREATE UNIQUE INDEX IF NOT EXISTS
+  idx_creator_profiles_first_collab_transfer_id
+
+ON creator_profiles (
+  first_collab_transfer_id
+)
+
+WHERE first_collab_transfer_id
+  IS NOT NULL;
+`);
+ await pool.query(`
 CREATE INDEX IF NOT EXISTS idx_referral_rewards_sponsor_status
 ON referral_rewards (sponsor_user_id, status);
 `);
@@ -4595,6 +4619,587 @@ app.get(
           "Could not load Creator Collab accounts.",
 
       });
+
+    }
+
+  }
+);
+// =========================================================
+// ADMIN: TMKP CREATOR COLLAB - COMPLETE FIRST COLLAB
+// =========================================================
+
+app.post(
+  "/admin/creators/:userId/complete-collab",
+  adminAuthMiddleware,
+  async (req, res) => {
+
+    const userId =
+      Number(req.params.userId);
+
+
+    if (
+      !Number.isInteger(userId) ||
+      userId <= 0
+    ) {
+
+      return res.status(400).json({
+        ok: false,
+        code: "INVALID_CREATOR_USER",
+        error: "A valid Creator user ID is required.",
+      });
+
+    }
+
+
+    try {
+
+      const result =
+        await pool.query(
+          `
+          UPDATE creator_profiles
+
+          SET
+            first_collab_status = 'completed',
+
+            first_collab_completed_at =
+              COALESCE(
+                first_collab_completed_at,
+                NOW()
+              ),
+
+            updated_at = NOW()
+
+          WHERE user_id = $1
+            AND creator_status = 'active'
+            AND first_collab_status = 'pending'
+
+          RETURNING
+            user_id,
+            first_collab_status,
+            first_collab_completed_at;
+          `,
+          [userId]
+        );
+
+
+      if (
+        result.rowCount === 1
+      ) {
+
+        return res.json({
+          ok: true,
+          completed: true,
+          alreadyCompleted: false,
+          creator: result.rows[0],
+        });
+
+      }
+
+
+      const { rows } =
+        await pool.query(
+          `
+          SELECT
+            user_id,
+            creator_status,
+            first_collab_status,
+            first_collab_completed_at,
+            first_collab_paid_at
+
+          FROM creator_profiles
+
+          WHERE user_id = $1
+
+          LIMIT 1;
+          `,
+          [userId]
+        );
+
+
+      if (
+        rows.length === 0
+      ) {
+
+        return res.status(404).json({
+          ok: false,
+          code: "CREATOR_NOT_FOUND",
+          error: "Creator account not found.",
+        });
+
+      }
+
+
+      const creator =
+        rows[0];
+
+
+      if (
+        creator.first_collab_status ===
+        "completed"
+      ) {
+
+        return res.json({
+          ok: true,
+          completed: true,
+          alreadyCompleted: true,
+          creator,
+        });
+
+      }
+
+
+      if (
+        creator.first_collab_status ===
+        "paid"
+      ) {
+
+        return res.status(409).json({
+          ok: false,
+          code:
+            "CREATOR_COLLAB_ALREADY_PAID",
+          error:
+            "This Creator Collab has already been paid.",
+        });
+
+      }
+
+
+      return res.status(409).json({
+        ok: false,
+        code:
+          "CREATOR_COLLAB_NOT_PENDING",
+        error:
+          "This Creator Collab cannot be marked completed from its current status.",
+      });
+
+
+    } catch (err) {
+
+      console.error(
+        "POST /admin/creators/:userId/complete-collab error:",
+        err
+      );
+
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "Could not complete Creator Collab.",
+      });
+
+    }
+
+  }
+);
+
+
+// =========================================================
+// ADMIN: TMKP CREATOR COLLAB - PAY FIRST COLLAB
+// =========================================================
+
+app.post(
+  "/admin/creators/:userId/pay-collab",
+  adminAuthMiddleware,
+  async (req, res) => {
+
+    const userId =
+      Number(req.params.userId);
+
+
+    if (
+      !Number.isInteger(userId) ||
+      userId <= 0
+    ) {
+
+      return res.status(400).json({
+        ok: false,
+        code: "INVALID_CREATOR_USER",
+        error: "A valid Creator user ID is required.",
+      });
+
+    }
+
+
+    if (
+      req.body?.confirm !==
+      "SEND_CREATOR_COLLAB_PAYOUT"
+    ) {
+
+      return res.status(400).json({
+        ok: false,
+        code: "CONFIRMATION_REQUIRED",
+        error:
+          "Explicit confirmation is required for the Creator Collab payout.",
+      });
+
+    }
+
+
+    if (!stripe) {
+
+      return res.status(503).json({
+        ok: false,
+        error: "Stripe is not configured.",
+      });
+
+    }
+
+
+    const client =
+      await pool.connect();
+
+
+    try {
+
+      await client.query(
+        "BEGIN"
+      );
+
+
+      const { rows } =
+        await client.query(
+          `
+          SELECT
+            cp.user_id,
+            cp.creator_invite_id,
+            cp.creator_status,
+            cp.first_collab_status,
+            cp.first_collab_paid_at,
+            cp.first_collab_transfer_id,
+
+            u.full_name,
+            u.email,
+            u.stripe_connect_account_id,
+
+            ci.collab_payout_cents
+
+          FROM creator_profiles cp
+
+          JOIN users u
+            ON u.id = cp.user_id
+
+          LEFT JOIN creator_invites ci
+            ON ci.id =
+              cp.creator_invite_id
+
+          WHERE cp.user_id = $1
+
+          LIMIT 1
+
+          FOR UPDATE OF cp;
+          `,
+          [userId]
+        );
+
+
+      if (
+        rows.length === 0
+      ) {
+
+        await client.query(
+          "ROLLBACK"
+        );
+
+
+        return res.status(404).json({
+          ok: false,
+          code: "CREATOR_NOT_FOUND",
+          error: "Creator account not found.",
+        });
+
+      }
+
+
+      const creator =
+        rows[0];
+
+
+      if (
+        creator.first_collab_status ===
+          "paid" ||
+        creator.first_collab_transfer_id
+      ) {
+
+        await client.query(
+          "COMMIT"
+        );
+
+
+        return res.json({
+          ok: true,
+          transferred: true,
+          alreadyPaid: true,
+
+          amountCents:
+            Number(
+              creator.collab_payout_cents ||
+              0
+            ),
+
+          transferId:
+            creator.first_collab_transfer_id ||
+            null,
+        });
+
+      }
+
+
+      if (
+        creator.first_collab_status !==
+        "completed"
+      ) {
+
+        await client.query(
+          "ROLLBACK"
+        );
+
+
+        return res.status(409).json({
+          ok: false,
+          code:
+            "CREATOR_COLLAB_NOT_COMPLETED",
+          error:
+            "Mark the Creator Collab as completed before paying it.",
+        });
+
+      }
+
+
+      const payoutCents =
+        Number(
+          creator.collab_payout_cents
+        );
+
+
+      if (
+        !Number.isInteger(
+          payoutCents
+        ) ||
+        payoutCents <= 0
+      ) {
+
+        await client.query(
+          "ROLLBACK"
+        );
+
+
+        return res.status(500).json({
+          ok: false,
+          code:
+            "INVALID_CREATOR_PAYOUT",
+          error:
+            "Creator Collab payout amount is not configured correctly.",
+        });
+
+      }
+
+
+      const accountId =
+        String(
+          creator
+            .stripe_connect_account_id ||
+          ""
+        ).trim();
+
+
+      if (!accountId) {
+
+        await client.query(
+          "ROLLBACK"
+        );
+
+
+        return res.status(409).json({
+          ok: false,
+          code:
+            "CONNECT_NOT_CONFIGURED",
+          error:
+            "Creator has not connected Stripe Express.",
+        });
+
+      }
+
+
+      const account =
+        await stripe.accounts.retrieve(
+          accountId
+        );
+
+
+      if (
+        account.details_submitted !==
+          true ||
+
+        account.payouts_enabled !==
+          true ||
+
+        account.capabilities
+          ?.transfers !==
+          "active"
+      ) {
+
+        await client.query(
+          "ROLLBACK"
+        );
+
+
+        return res.status(409).json({
+          ok: false,
+          code:
+            "CONNECT_NOT_READY",
+          error:
+            "Creator Stripe Express account is not ready to receive payouts.",
+        });
+
+      }
+
+
+      const idempotencyKey =
+        `tmkp-creator-collab-${
+          creator.creator_invite_id ||
+          userId
+        }`;
+
+
+      const transfer =
+        await stripe.transfers.create(
+          {
+
+            amount:
+              payoutCents,
+
+            currency:
+              "usd",
+
+            destination:
+              accountId,
+
+            metadata: {
+
+              tmkp_creator_user_id:
+                String(userId),
+
+              tmkp_creator_invite_id:
+                String(
+                  creator.creator_invite_id ||
+                  ""
+                ),
+
+              purpose:
+                "creator_collab_payout",
+
+            },
+
+          },
+
+          {
+            idempotencyKey,
+          }
+
+        );
+
+
+      const updateResult =
+        await client.query(
+          `
+          UPDATE creator_profiles
+
+          SET
+            first_collab_status = 'paid',
+
+            first_collab_paid_at =
+              COALESCE(
+                first_collab_paid_at,
+                NOW()
+              ),
+
+            first_collab_transfer_id =
+              $2,
+
+            updated_at = NOW()
+
+          WHERE user_id = $1
+            AND first_collab_status =
+              'completed'
+            AND first_collab_transfer_id
+              IS NULL
+
+          RETURNING
+            user_id,
+            first_collab_status,
+            first_collab_paid_at,
+            first_collab_transfer_id;
+          `,
+          [
+            userId,
+            transfer.id
+          ]
+        );
+
+
+      if (
+        updateResult.rowCount !== 1
+      ) {
+
+        throw new Error(
+          "Creator Collab payout record could not be finalized."
+        );
+
+      }
+
+
+      await client.query(
+        "COMMIT"
+      );
+
+
+      return res.json({
+
+        ok: true,
+
+        transferred: true,
+
+        alreadyPaid: false,
+
+        amountCents:
+          payoutCents,
+
+        amount:
+          payoutCents / 100,
+
+        currency:
+          "usd",
+
+        transferId:
+          transfer.id,
+
+      });
+
+
+    } catch (err) {
+
+      await client.query(
+        "ROLLBACK"
+      ).catch(() => {});
+
+
+      console.error(
+        "POST /admin/creators/:userId/pay-collab error:",
+        err
+      );
+
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          err?.message ||
+          "Could not pay Creator Collab.",
+      });
+
+
+    } finally {
+
+      client.release();
 
     }
 
